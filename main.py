@@ -3,12 +3,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 import uvicorn
+import asyncio
 import os
 import json
 import uuid
 from config import get_settings
 from routes import auth_router, chat_router
+from routes.files import router as files_router
+from file_manager import get_file_watcher, list_directory, FileEvent
 
 # Use sandbox_manager on Modal, sessions locally
 IS_MODAL = os.environ.get("MODAL_ENVIRONMENT") is not None
@@ -34,10 +38,47 @@ else:
         get_queue_status,
     )
 
+
+# Store active file watcher WebSocket connections
+_file_ws_connections: set[WebSocket] = set()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan - start/stop file watcher."""
+    # Startup
+    loop = asyncio.get_event_loop()
+    file_watcher = get_file_watcher()
+    file_watcher.start(loop)
+
+    # Subscribe to file events and broadcast to all connected WebSockets
+    def broadcast_file_event(event: FileEvent):
+        """Broadcast file event to all connected WebSocket clients."""
+        if _file_ws_connections:
+            event_data = {
+                "type": "file_event",
+                **event.to_dict()
+            }
+            # Schedule broadcast for each connection
+            for ws in list(_file_ws_connections):
+                try:
+                    asyncio.create_task(ws.send_json(event_data))
+                except Exception:
+                    pass
+
+    file_watcher.subscribe(broadcast_file_event)
+
+    yield
+
+    # Shutdown
+    file_watcher.stop()
+
+
 app = FastAPI(
     title="Monios API",
     description="Backend API for Monios chat application",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS configuration
@@ -52,6 +93,7 @@ app.add_middleware(
 # Include routers
 app.include_router(auth_router)
 app.include_router(chat_router)
+app.include_router(files_router)
 
 
 # Public chat endpoint for web UI (no auth required)
@@ -225,6 +267,87 @@ async def websocket_chat(websocket: WebSocket):
         # Clean up callback when disconnected
         if user_id:
             set_response_callback(user_id, None)
+
+
+# WebSocket endpoint for real-time file system updates
+@app.websocket("/ws/files")
+async def websocket_files(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time file system updates.
+
+    Client sends JSON messages:
+    - {"type": "subscribe"} - Start receiving file events
+    - {"type": "get_tree", "path": "..."} - Get directory tree
+
+    Server sends JSON responses:
+    - {"type": "subscribed"}
+    - {"type": "tree", "data": {...}}
+    - {"type": "file_event", "event_type": "created|deleted|modified|moved", ...}
+    """
+    await websocket.accept()
+    _file_ws_connections.add(websocket)
+
+    try:
+        # Send initial directory tree
+        try:
+            tree = list_directory("")
+            await websocket.send_json({
+                "type": "tree",
+                "data": tree.to_dict()
+            })
+        except Exception as e:
+            await websocket.send_json({
+                "type": "error",
+                "error": f"Failed to load directory tree: {str(e)}"
+            })
+
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                await websocket.send_json({
+                    "type": "error",
+                    "error": "Invalid JSON"
+                })
+                continue
+
+            msg_type = msg.get("type")
+
+            if msg_type == "get_tree":
+                path = msg.get("path", "")
+                try:
+                    tree = list_directory(path)
+                    await websocket.send_json({
+                        "type": "tree",
+                        "data": tree.to_dict()
+                    })
+                except FileNotFoundError as e:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": str(e)
+                    })
+                except NotADirectoryError as e:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": str(e)
+                    })
+
+            elif msg_type == "subscribe":
+                await websocket.send_json({"type": "subscribed"})
+
+            else:
+                await websocket.send_json({
+                    "type": "error",
+                    "error": f"Unknown message type: {msg_type}"
+                })
+
+    except WebSocketDisconnect:
+        print("File watcher WebSocket disconnected")
+    except Exception as e:
+        print(f"File watcher WebSocket error: {e}")
+    finally:
+        _file_ws_connections.discard(websocket)
 
 
 # Serve static frontend files

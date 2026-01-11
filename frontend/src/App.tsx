@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "./AuthContext";
+import FileExplorer from "./FileExplorer";
 
 type MessageStatus = "sending" | "queued" | "processing" | "completed" | "error" | "cancelled";
 
@@ -68,6 +69,8 @@ export default function App() {
     size: 0,
     processing: false,
   });
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const userInputRef = useRef<HTMLInputElement>(null);
@@ -370,9 +373,57 @@ export default function App() {
     }
   };
 
+  // Drag and drop handlers for file explorer
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDraggingOver(false);
+
+    const path = e.dataTransfer.getData("text/plain");
+    if (path) {
+      // Insert path at cursor position or append
+      const textarea = textareaRef.current;
+      if (textarea) {
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const currentValue = input;
+        const newValue = currentValue.substring(0, start) + path + currentValue.substring(end);
+        setInput(newValue);
+        // Set cursor after inserted path
+        setTimeout(() => {
+          textarea.focus();
+          textarea.setSelectionRange(start + path.length, start + path.length);
+        }, 0);
+      } else {
+        setInput((prev) => prev + path);
+      }
+    }
+  };
+
+  const toggleSidebar = () => setSidebarOpen((prev) => !prev);
+
   return (
     <div className="app">
       <header>
+        <button
+          className="sidebar-toggle"
+          onClick={toggleSidebar}
+          title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+        >
+          {sidebarOpen ? "\u2630" : "\u2630"}
+        </button>
         <span className="logo">monios</span>
         <div className="header-actions">
           {auth.isAuthenticated ? (
@@ -431,97 +482,115 @@ export default function App() {
         </div>
       </header>
 
-      <div className="messages">
-        {messages.length === 0 && (
-          <div className="message system">
-            {auth.isAuthenticated
-              ? `signed in as ${auth.user?.email}. send a message to start chatting`
-              : "send a message to start chatting (or sign in with Google)"}
-          </div>
+      <div className="main-layout">
+        {sidebarOpen && (
+          <aside className="sidebar">
+            <FileExplorer />
+          </aside>
         )}
 
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`message ${msg.type === "tool" ? "assistant" : msg.type} ${msg.status ? `status-${msg.status}` : ""}`}
-          >
-            {msg.type === "tool" && msg.tool ? (
-              msg.tool.type === "tool_use" ? (
-                <div className="tool-use">
-                  <div className="tool-name">tool: {msg.tool.name}</div>
-                  <div className="tool-input">
-                    {JSON.stringify(msg.tool.input ?? {}, null, 2)}
-                  </div>
-                </div>
-              ) : (
-                <div className="tool-result">
-                  {JSON.stringify(msg.tool.content ?? "", null, 2)}
-                </div>
-              )
-            ) : (
-              <>
-                <div className="message-content">{msg.content}</div>
-                {msg.type === "user" && msg.status && msg.status !== "completed" && (
-                  <div className="message-status">
-                    {msg.status === "sending" && (
-                      <span className="status-indicator sending">sending...</span>
-                    )}
-                    {msg.status === "queued" && (
-                      <span className="status-indicator queued">
-                        queued{msg.queuePosition ? ` (#${msg.queuePosition})` : ""}
-                      </span>
-                    )}
-                    {msg.status === "processing" && (
-                      <span className="status-indicator processing">
-                        <span className="status-dot loading"></span>
-                        processing...
-                      </span>
-                    )}
-                    {msg.status === "error" && (
-                      <span className="status-indicator error">error</span>
-                    )}
-                    {msg.status === "cancelled" && (
-                      <span className="status-indicator cancelled">cancelled</span>
-                    )}
-                  </div>
-                )}
-              </>
+        <div className="chat-container">
+          <div className="messages">
+            {messages.length === 0 && (
+              <div className="message system">
+                {auth.isAuthenticated
+                  ? `signed in as ${auth.user?.email}. send a message to start chatting`
+                  : "send a message to start chatting (or sign in with Google)"}
+              </div>
             )}
+
+            {messages.map((msg) => (
+              <div
+                key={msg.id}
+                className={`message ${msg.type === "tool" ? "assistant" : msg.type} ${msg.status ? `status-${msg.status}` : ""}`}
+              >
+                {msg.type === "tool" && msg.tool ? (
+                  msg.tool.type === "tool_use" ? (
+                    <div className="tool-use">
+                      <div className="tool-name">tool: {msg.tool.name}</div>
+                      <div className="tool-input">
+                        {JSON.stringify(msg.tool.input ?? {}, null, 2)}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="tool-result">
+                      {JSON.stringify(msg.tool.content ?? "", null, 2)}
+                    </div>
+                  )
+                ) : (
+                  <>
+                    <div className="message-content">{msg.content}</div>
+                    {msg.type === "user" && msg.status && msg.status !== "completed" && (
+                      <div className="message-status">
+                        {msg.status === "sending" && (
+                          <span className="status-indicator sending">sending...</span>
+                        )}
+                        {msg.status === "queued" && (
+                          <span className="status-indicator queued">
+                            queued{msg.queuePosition ? ` (#${msg.queuePosition})` : ""}
+                          </span>
+                        )}
+                        {msg.status === "processing" && (
+                          <span className="status-indicator processing">
+                            <span className="status-dot loading"></span>
+                            processing...
+                          </span>
+                        )}
+                        {msg.status === "error" && (
+                          <span className="status-indicator error">error</span>
+                        )}
+                        {msg.status === "cancelled" && (
+                          <span className="status-indicator cancelled">cancelled</span>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            ))}
+
+            {error && (
+              <div className="error">{error}</div>
+            )}
+
+            <div ref={messagesEndRef} />
           </div>
-        ))}
 
-        {error && (
-          <div className="error">{error}</div>
-        )}
-
-        <div ref={messagesEndRef} />
-      </div>
-
-      <div className="input-area">
-        {(queueStatus.size > 0 || queueStatus.processing) && (
-          <div className="queue-status">
-            {queueStatus.processing && <span className="status-dot processing"></span>}
-            {queueStatus.size > 0 && <span>queue: {queueStatus.size}</span>}
+          <div
+            className={`input-area ${isDraggingOver ? "drag-over" : ""}`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            {isDraggingOver && (
+              <div className="drop-indicator">Drop file path here</div>
+            )}
+            {(queueStatus.size > 0 || queueStatus.processing) && (
+              <div className="queue-status">
+                {queueStatus.processing && <span className="status-dot processing"></span>}
+                {queueStatus.size > 0 && <span>queue: {queueStatus.size}</span>}
+              </div>
+            )}
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value);
+                adjustTextareaHeight();
+              }}
+              onKeyDown={handleKeyDown}
+              placeholder={wsConnected ? "type a message... (drag files here)" : "connecting..."}
+              rows={1}
+            />
+            <button
+              className="send-btn"
+              onClick={sendMessage}
+              disabled={!input.trim() || !wsConnected}
+            >
+              send
+            </button>
           </div>
-        )}
-        <textarea
-          ref={textareaRef}
-          value={input}
-          onChange={(e) => {
-            setInput(e.target.value);
-            adjustTextareaHeight();
-          }}
-          onKeyDown={handleKeyDown}
-          placeholder={wsConnected ? "type a message... (can send multiple)" : "connecting..."}
-          rows={1}
-        />
-        <button
-          className="send-btn"
-          onClick={sendMessage}
-          disabled={!input.trim() || !wsConnected}
-        >
-          send
-        </button>
+        </div>
       </div>
     </div>
   );

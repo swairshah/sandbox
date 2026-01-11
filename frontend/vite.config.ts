@@ -11,6 +11,15 @@ export default defineConfig({
     proxy: {
       '/chat': 'http://localhost:8000',
       '/health': 'http://localhost:8000',
+      '/api': 'http://localhost:8000',
+      '/ws/chat': {
+        target: 'ws://localhost:8000',
+        ws: true,
+      },
+      '/ws/files': {
+        target: 'ws://localhost:8000',
+        ws: true,
+      },
     }
   }
 })

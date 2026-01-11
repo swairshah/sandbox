@@ -45,7 +45,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  max-width: 800px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 1rem;
 }
@@ -444,4 +444,257 @@ header {
 /* Input area with queue status */
 .input-area {
   flex-wrap: wrap;
+  position: relative;
+}
+
+/* Main layout with sidebar */
+.main-layout {
+  display: flex;
+  flex: 1;
+  gap: 1rem;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 250px;
+  min-width: 200px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  padding-right: 1rem;
+}
+
+.chat-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sidebar-toggle {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1.1rem;
+  padding: 0.25rem 0.5rem;
+  margin-right: 0.5rem;
+  transition: color 0.2s;
+  font-family: inherit;
+}
+
+.sidebar-toggle:hover {
+  color: var(--text);
+}
+
+/* File Explorer Styles */
+.file-explorer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.file-explorer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.25rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+}
+
+.file-explorer-title {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.file-explorer-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.file-explorer-action {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 0.15rem 0.3rem;
+  border-radius: 3px;
+  transition: color 0.2s, background-color 0.2s;
+}
+
+.file-explorer-action:hover {
+  color: var(--text);
+  background: var(--bg-card);
+}
+
+.connection-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  transition: background-color 0.3s;
+}
+
+.connection-dot.connected {
+  background: var(--accent-teal);
+}
+
+.connection-dot.disconnected {
+  background: #ef4444;
+}
+
+.file-explorer-content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.file-explorer-loading,
+.file-explorer-error,
+.file-explorer-empty {
+  padding: 1rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.file-explorer-error {
+  color: #ef4444;
+}
+
+/* File Tree Styles */
+.file-tree {
+  font-size: 0.85rem;
+}
+
+.tree-node {
+  user-select: none;
+}
+
+.tree-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background-color 0.1s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-item:hover {
+  background: var(--bg-card);
+}
+
+.tree-item.directory {
+  color: var(--text);
+}
+
+.tree-item.file {
+  color: var(--text-muted);
+}
+
+.tree-item.file:hover {
+  color: var(--text);
+}
+
+.tree-icon {
+  font-size: 0.75rem;
+  width: 1.2em;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.tree-icon.folder-icon {
+  color: var(--accent);
+  font-size: 0.6rem;
+}
+
+.tree-icon.file-icon {
+  font-size: 0.9rem;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-children {
+  /* Children are indented via paddingLeft in JS */
+}
+
+/* Drag states */
+.tree-item[draggable="true"] {
+  cursor: grab;
+}
+
+.tree-item[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* Drag and drop target styles */
+.input-area.drag-over {
+  border-color: var(--accent-teal);
+  background: rgba(16, 185, 129, 0.05);
+}
+
+.input-area.drag-over textarea {
+  border-color: var(--accent-teal);
+}
+
+.drop-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 185, 129, 0.1);
+  border: 2px dashed var(--accent-teal);
+  border-radius: 6px;
+  color: var(--accent-teal);
+  font-size: 0.85rem;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 280px;
+    background: var(--bg);
+    z-index: 100;
+    padding: 1rem;
+    border-right: 1px solid var(--border);
+    transform: translateX(-100%);
+    transition: transform 0.3s ease;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .main-layout {
+    flex-direction: column;
+  }
+
+  .chat-container {
+    flex: 1;
+  }
 }

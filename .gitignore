@@ -82,3 +82,6 @@ htmlcov/
 *.iml
 .vscode/
 *.log
+
+.session_ids.json
+workspace
