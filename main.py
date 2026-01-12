@@ -13,6 +13,7 @@ from config import get_settings
 from routes import auth_router, chat_router
 from routes.files import router as files_router
 from file_manager import get_file_watcher, list_directory, FileEvent
+from terminal import terminal_session
 
 # Use sandbox_manager on Modal, sessions locally
 IS_MODAL = os.environ.get("MODAL_ENVIRONMENT") is not None
@@ -348,6 +349,33 @@ async def websocket_files(websocket: WebSocket):
         print(f"File watcher WebSocket error: {e}")
     finally:
         _file_ws_connections.discard(websocket)
+
+
+# WebSocket endpoint for PTY terminal
+@app.websocket("/ws/terminal")
+async def websocket_terminal(websocket: WebSocket):
+    """
+    WebSocket endpoint for PTY terminal access.
+
+    Protocol:
+    - Client sends raw text input (keystrokes)
+    - Client sends JSON for control: {"type": "resize", "cols": N, "rows": N}
+    - Server sends raw text output (terminal output)
+    """
+    await websocket.accept()
+
+    async def send_json(data: dict):
+        await websocket.send_json(data)
+
+    async def receive_text() -> str:
+        return await websocket.receive_text()
+
+    try:
+        await terminal_session(websocket, send_json, receive_text)
+    except WebSocketDisconnect:
+        print("Terminal WebSocket disconnected")
+    except Exception as e:
+        print(f"Terminal WebSocket error: {e}")
 
 
 # Serve static frontend files

@@ -698,3 +698,305 @@ header {
     flex: 1;
   }
 }
+
+/* Terminal Styles */
+.terminal-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: #0f1115;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.terminal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+}
+
+.terminal-title {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.terminal-content {
+  flex: 1;
+  padding: 0.5rem;
+  overflow: hidden;
+}
+
+.terminal-content .xterm {
+  height: 100%;
+}
+
+.terminal-content .xterm-viewport {
+  overflow-y: auto !important;
+}
+
+/* Panel layout for chat + terminal */
+.panel-layout {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  gap: 0.5rem;
+}
+
+.panel-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0 0.25rem;
+}
+
+.panel-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.panel-tab:hover {
+  color: var(--text);
+}
+
+.panel-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.panel-content {
+  flex: 1;
+  overflow: hidden;
+  display: none;
+}
+
+.panel-content.active {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Split view for showing both chat and terminal */
+.split-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+.split-view .chat-panel,
+.split-view .terminal-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.split-view .terminal-panel {
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+
+/* Resizable split */
+.split-resizer {
+  height: 4px;
+  background: var(--border);
+  cursor: row-resize;
+  transition: background 0.2s;
+}
+
+.split-resizer:hover {
+  background: var(--accent);
+}
+
+/* Code Viewer Styles */
+.code-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.code-viewer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  min-height: 36px;
+}
+
+.code-viewer-title {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.code-viewer-file-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  overflow: hidden;
+}
+
+.code-viewer-filename {
+  font-size: 0.85rem;
+  color: var(--text);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-viewer-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.code-viewer-language {
+  background: var(--bg);
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  text-transform: lowercase;
+}
+
+.code-viewer-size {
+  color: var(--text-muted);
+}
+
+.code-viewer-truncated {
+  color: var(--accent);
+  font-style: italic;
+}
+
+.code-viewer-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.read-only-badge {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  background: var(--bg);
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.code-viewer-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 0.1rem 0.3rem;
+  line-height: 1;
+  border-radius: 3px;
+  transition: color 0.2s, background-color 0.2s;
+}
+
+.code-viewer-close:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.code-viewer-content {
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+}
+
+.code-viewer-pre {
+  margin: 0;
+  padding: 1rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  background: transparent !important;
+  overflow-x: auto;
+}
+
+.code-viewer-pre code {
+  font-family: inherit;
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+/* Override highlight.js background to match our theme */
+.code-viewer-pre code.hljs {
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+.code-viewer-empty,
+.code-viewer-loading,
+.code-viewer-error,
+.code-viewer-binary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  text-align: center;
+  padding: 2rem;
+  gap: 0.75rem;
+}
+
+.code-viewer-error {
+  color: #ef4444;
+}
+
+.empty-icon,
+.binary-icon {
+  font-size: 2.5rem;
+  opacity: 0.5;
+}
+
+.binary-size {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* Tab indicator for open file */
+.tab-indicator {
+  color: var(--accent);
+  margin-left: 0.25rem;
+}
+
+/* Line numbers styling (if highlight.js adds them) */
+.code-viewer-pre .hljs-ln-numbers {
+  color: var(--text-muted);
+  padding-right: 1rem;
+  text-align: right;
+  user-select: none;
+}

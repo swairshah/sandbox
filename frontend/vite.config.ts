@@ -20,6 +20,10 @@ export default defineConfig({
         target: 'ws://localhost:8000',
         ws: true,
       },
+      '/ws/terminal': {
+        target: 'ws://localhost:8000',
+        ws: true,
+      },
     }
   }
 })

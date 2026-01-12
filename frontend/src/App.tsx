@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "./AuthContext";
 import FileExplorer from "./FileExplorer";
+import Terminal from "./Terminal";
+import CodeViewer from "./CodeViewer";
 
 type MessageStatus = "sending" | "queued" | "processing" | "completed" | "error" | "cancelled";
 
@@ -71,6 +73,9 @@ export default function App() {
   });
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [activePanel, setActivePanel] = useState<"chat" | "terminal" | "viewer">("chat");
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [viewerReadOnly] = useState(true); // Config: set to false to enable editing
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const userInputRef = useRef<HTMLInputElement>(null);
@@ -414,6 +419,20 @@ export default function App() {
 
   const toggleSidebar = () => setSidebarOpen((prev) => !prev);
 
+  // Handle file selection from FileExplorer
+  const handleFileSelect = (path: string, isDirectory: boolean) => {
+    if (!isDirectory) {
+      setSelectedFile(path);
+      setActivePanel("viewer");
+    }
+  };
+
+  // Close the viewer
+  const handleCloseViewer = () => {
+    setSelectedFile(null);
+    setActivePanel("chat");
+  };
+
   return (
     <div className="app">
       <header>
@@ -485,19 +504,42 @@ export default function App() {
       <div className="main-layout">
         {sidebarOpen && (
           <aside className="sidebar">
-            <FileExplorer />
+            <FileExplorer onFileSelect={handleFileSelect} />
           </aside>
         )}
 
         <div className="chat-container">
-          <div className="messages">
-            {messages.length === 0 && (
-              <div className="message system">
-                {auth.isAuthenticated
-                  ? `signed in as ${auth.user?.email}. send a message to start chatting`
-                  : "send a message to start chatting (or sign in with Google)"}
-              </div>
-            )}
+          <div className="panel-tabs">
+            <button
+              className={`panel-tab ${activePanel === "chat" ? "active" : ""}`}
+              onClick={() => setActivePanel("chat")}
+            >
+              Chat
+            </button>
+            <button
+              className={`panel-tab ${activePanel === "terminal" ? "active" : ""}`}
+              onClick={() => setActivePanel("terminal")}
+            >
+              Terminal
+            </button>
+            <button
+              className={`panel-tab ${activePanel === "viewer" ? "active" : ""}`}
+              onClick={() => setActivePanel("viewer")}
+            >
+              Viewer
+              {selectedFile && <span className="tab-indicator">*</span>}
+            </button>
+          </div>
+
+          <div className={`panel-content ${activePanel === "chat" ? "active" : ""}`}>
+            <div className="messages">
+              {messages.length === 0 && (
+                <div className="message system">
+                  {auth.isAuthenticated
+                    ? `signed in as ${auth.user?.email}. send a message to start chatting`
+                    : "send a message to start chatting (or sign in with Google)"}
+                </div>
+              )}
 
             {messages.map((msg) => (
               <div
@@ -589,6 +631,19 @@ export default function App() {
             >
               send
             </button>
+            </div>
+          </div>
+
+          <div className={`panel-content ${activePanel === "terminal" ? "active" : ""}`}>
+            <Terminal />
+          </div>
+
+          <div className={`panel-content ${activePanel === "viewer" ? "active" : ""}`}>
+            <CodeViewer
+              filePath={selectedFile}
+              readOnly={viewerReadOnly}
+              onClose={handleCloseViewer}
+            />
           </div>
         </div>
       </div>

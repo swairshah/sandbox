@@ -119,6 +119,88 @@ def _build_tree(path: Path, relative_base: str) -> FileNode:
     return FileNode(name=name, path=rel_path, type="directory", children=children)
 
 
+def read_file_contents(relative_path: str, max_size: int = 1024 * 1024) -> dict:
+    """
+    Read the contents of a file within workspace.
+
+    Args:
+        relative_path: Path relative to workspace directory
+        max_size: Maximum file size to read (default 1MB)
+
+    Returns:
+        dict with content, size, truncated flag, and file info
+    """
+    if not relative_path:
+        raise ValueError("File path is required")
+
+    target_path = WORKSPACE_DIR / relative_path
+
+    if not target_path.exists():
+        raise FileNotFoundError(f"File not found: {relative_path}")
+
+    if target_path.is_dir():
+        raise IsADirectoryError(f"Cannot read directory: {relative_path}")
+
+    # Security check: ensure we're still within workspace
+    try:
+        target_path.resolve().relative_to(WORKSPACE_DIR.resolve())
+    except ValueError:
+        raise PermissionError(f"Access denied: {relative_path}")
+
+    file_size = target_path.stat().st_size
+    truncated = file_size > max_size
+
+    # Determine if it's likely a binary file
+    binary_extensions = {
+        '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp',
+        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+        '.zip', '.tar', '.gz', '.rar', '.7z',
+        '.exe', '.dll', '.so', '.dylib',
+        '.mp3', '.mp4', '.wav', '.avi', '.mov', '.mkv',
+        '.ttf', '.woff', '.woff2', '.eot',
+        '.pyc', '.pyo', '.class',
+    }
+
+    ext = target_path.suffix.lower()
+    is_binary = ext in binary_extensions
+
+    if is_binary:
+        return {
+            "path": relative_path,
+            "name": target_path.name,
+            "content": None,
+            "size": file_size,
+            "truncated": False,
+            "is_binary": True,
+            "extension": ext,
+        }
+
+    try:
+        with open(target_path, 'r', encoding='utf-8') as f:
+            content = f.read(max_size)
+    except UnicodeDecodeError:
+        # Probably a binary file
+        return {
+            "path": relative_path,
+            "name": target_path.name,
+            "content": None,
+            "size": file_size,
+            "truncated": False,
+            "is_binary": True,
+            "extension": ext,
+        }
+
+    return {
+        "path": relative_path,
+        "name": target_path.name,
+        "content": content,
+        "size": file_size,
+        "truncated": truncated,
+        "is_binary": False,
+        "extension": ext,
+    }
+
+
 def get_flat_directory(relative_path: str = "") -> list[dict]:
     """
     Get a flat list of immediate children in a directory.

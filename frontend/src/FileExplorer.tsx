@@ -16,6 +16,7 @@ interface FileEvent {
 
 interface FileExplorerProps {
   onFileDragStart?: (path: string) => void;
+  onFileSelect?: (path: string, isDirectory: boolean) => void;
 }
 
 // File type icons (using unicode/emoji for simplicity, can be replaced with SVG)
@@ -76,9 +77,10 @@ interface TreeNodeProps {
   expandedPaths: Set<string>;
   onToggle: (path: string) => void;
   onDragStart: (e: React.DragEvent, path: string) => void;
+  onFileSelect?: (path: string, isDirectory: boolean) => void;
 }
 
-function TreeNode({ node, depth, expandedPaths, onToggle, onDragStart }: TreeNodeProps) {
+function TreeNode({ node, depth, expandedPaths, onToggle, onDragStart, onFileSelect }: TreeNodeProps) {
   const isExpanded = expandedPaths.has(node.path);
   const isDirectory = node.type === 'directory';
   const icon = getFileIcon(node.name, node.type, isExpanded);
@@ -86,6 +88,9 @@ function TreeNode({ node, depth, expandedPaths, onToggle, onDragStart }: TreeNod
   const handleClick = () => {
     if (isDirectory) {
       onToggle(node.path);
+    } else {
+      // File clicked - notify parent
+      onFileSelect?.(node.path, false);
     }
   };
 
@@ -120,6 +125,7 @@ function TreeNode({ node, depth, expandedPaths, onToggle, onDragStart }: TreeNod
               expandedPaths={expandedPaths}
               onToggle={onToggle}
               onDragStart={onDragStart}
+              onFileSelect={onFileSelect}
             />
           ))}
         </div>
@@ -128,7 +134,7 @@ function TreeNode({ node, depth, expandedPaths, onToggle, onDragStart }: TreeNod
   );
 }
 
-export default function FileExplorer({ onFileDragStart }: FileExplorerProps) {
+export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExplorerProps) {
   const [tree, setTree] = useState<FileNode | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set(['.']));
   const [connected, setConnected] = useState(false);
@@ -255,6 +261,7 @@ export default function FileExplorer({ onFileDragStart }: FileExplorerProps) {
                   expandedPaths={expandedPaths}
                   onToggle={handleToggle}
                   onDragStart={handleDragStart}
+                  onFileSelect={onFileSelect}
                 />
               ))
             ) : (
