@@ -7,14 +7,8 @@ interface FileNode {
   children?: FileNode[];
 }
 
-interface FileEvent {
-  event_type: 'created' | 'deleted' | 'modified' | 'moved';
-  path: string;
-  is_directory: boolean;
-  dest_path?: string;
-}
-
 interface FileExplorerProps {
+  userId: string;
   onFileDragStart?: (path: string) => void;
   onFileSelect?: (path: string, isDirectory: boolean) => void;
 }
@@ -134,13 +128,15 @@ function TreeNode({ node, depth, expandedPaths, onToggle, onDragStart, onFileSel
   );
 }
 
-export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExplorerProps) {
+export default function FileExplorer({ userId, onFileDragStart, onFileSelect }: FileExplorerProps) {
   const [tree, setTree] = useState<FileNode | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set(['.']));
   const [connected, setConnected] = useState(false);
+  const [spriteName, setSpriteName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
+  const connectedToSpriteRef = useRef(false);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -150,21 +146,27 @@ export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExpl
     const ws = new WebSocket(`${protocol}//${host}/ws/files`);
 
     ws.onopen = () => {
-      setConnected(true);
-      setError(null);
-      ws.send(JSON.stringify({ type: 'subscribe' }));
+      // Send connect message with user_id first
+      ws.send(JSON.stringify({ type: 'connect', user_id: userId }));
     };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
 
+        if (data.type === 'connected') {
+          connectedToSpriteRef.current = true;
+          setConnected(true);
+          setSpriteName(data.sprite_name || null);
+          setError(null);
+          return;
+        }
+
         if (data.type === 'tree') {
           setTree(data.data);
-        } else if (data.type === 'file_event') {
-          handleFileEvent(data as FileEvent);
         } else if (data.type === 'error') {
           console.error('File WebSocket error:', data.error);
+          setError(data.error);
         }
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);
@@ -173,6 +175,7 @@ export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExpl
 
     ws.onclose = () => {
       setConnected(false);
+      connectedToSpriteRef.current = false;
       wsRef.current = null;
       // Reconnect after 2 seconds
       reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
@@ -184,15 +187,7 @@ export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExpl
     };
 
     wsRef.current = ws;
-  }, []);
-
-  const handleFileEvent = (event: FileEvent) => {
-    // Request fresh tree on any file event
-    // This is simpler than trying to update the tree in place
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'get_tree', path: '' }));
-    }
-  };
+  }, [userId]);
 
   useEffect(() => {
     connect();
@@ -224,15 +219,17 @@ export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExpl
   };
 
   const handleRefresh = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'get_tree', path: '' }));
+    if (wsRef.current?.readyState === WebSocket.OPEN && connectedToSpriteRef.current) {
+      wsRef.current.send(JSON.stringify({ type: 'refresh' }));
     }
   };
 
   return (
     <div className="file-explorer">
       <div className="file-explorer-header">
-        <span className="file-explorer-title">WORKSPACE</span>
+        <span className="file-explorer-title">
+          FILES {spriteName && <span className="file-explorer-sprite-name">({spriteName})</span>}
+        </span>
         <div className="file-explorer-actions">
           <button
             className="file-explorer-action"
@@ -243,7 +240,7 @@ export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExpl
           </button>
           <span
             className={`connection-dot ${connected ? 'connected' : 'disconnected'}`}
-            title={connected ? 'Connected' : 'Disconnected'}
+            title={connected ? `Connected to ${spriteName}` : 'Disconnected'}
           />
         </div>
       </div>

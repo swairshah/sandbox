@@ -3,6 +3,7 @@ import { useAuth } from "./AuthContext";
 import FileExplorer from "./FileExplorer";
 import Terminal from "./Terminal";
 import CodeViewer from "./CodeViewer";
+import { SpritePreview } from "./SpritePreview";
 
 type MessageStatus = "sending" | "queued" | "processing" | "completed" | "error" | "cancelled";
 
@@ -73,7 +74,7 @@ export default function App() {
   });
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
-  const [activePanel, setActivePanel] = useState<"chat" | "terminal" | "viewer">("chat");
+  const [activePanel, setActivePanel] = useState<"chat" | "terminal" | "viewer" | "preview">("chat");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [viewerReadOnly] = useState(true); // Config: set to false to enable editing
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -504,7 +505,7 @@ export default function App() {
       <div className="main-layout">
         {sidebarOpen && (
           <aside className="sidebar">
-            <FileExplorer onFileSelect={handleFileSelect} />
+            <FileExplorer userId={userId} onFileSelect={handleFileSelect} />
           </aside>
         )}
 
@@ -528,6 +529,12 @@ export default function App() {
             >
               Viewer
               {selectedFile && <span className="tab-indicator">*</span>}
+            </button>
+            <button
+              className={`panel-tab ${activePanel === "preview" ? "active" : ""}`}
+              onClick={() => setActivePanel("preview")}
+            >
+              Preview
             </button>
           </div>
 
@@ -635,15 +642,20 @@ export default function App() {
           </div>
 
           <div className={`panel-content ${activePanel === "terminal" ? "active" : ""}`}>
-            <Terminal />
+            <Terminal userId={userId} />
           </div>
 
           <div className={`panel-content ${activePanel === "viewer" ? "active" : ""}`}>
             <CodeViewer
+              userId={userId}
               filePath={selectedFile}
               readOnly={viewerReadOnly}
               onClose={handleCloseViewer}
             />
+          </div>
+
+          <div className={`panel-content ${activePanel === "preview" ? "active" : ""}`}>
+            <SpritePreview userId={userId} />
           </div>
         </div>
       </div>

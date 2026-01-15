@@ -6,15 +6,18 @@ import 'xterm/css/xterm.css';
 
 interface TerminalProps {
   className?: string;
+  userId: string;
 }
 
-export default function Terminal({ className }: TerminalProps) {
+export default function Terminal({ className, userId }: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
   const [connected, setConnected] = useState(false);
+  const [spriteName, setSpriteName] = useState<string | null>(null);
+  const connectedToSpriteRef = useRef(false);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -24,15 +27,42 @@ export default function Terminal({ className }: TerminalProps) {
     const ws = new WebSocket(`${protocol}//${host}/ws/terminal`);
 
     ws.onopen = () => {
-      setConnected(true);
-      // Send initial size
-      if (xtermRef.current) {
-        const { cols, rows } = xtermRef.current;
-        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-      }
+      // Send connect message with user_id first
+      ws.send(JSON.stringify({ type: 'connect', user_id: userId }));
     };
 
     ws.onmessage = (event) => {
+      // Check if it's a JSON control message
+      if (event.data.startsWith('{')) {
+        try {
+          const msg = JSON.parse(event.data);
+
+          if (msg.type === 'connected') {
+            connectedToSpriteRef.current = true;
+            setConnected(true);
+            setSpriteName(msg.sprite_name || null);
+
+            // Send initial size now that we're connected
+            if (xtermRef.current) {
+              const { cols, rows } = xtermRef.current;
+              ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+            }
+            return;
+          }
+
+          if (msg.type === 'error') {
+            console.error('Terminal error:', msg.message);
+            if (xtermRef.current) {
+              xtermRef.current.write(`\r\n\x1b[31mError: ${msg.message}\x1b[0m\r\n`);
+            }
+            return;
+          }
+        } catch {
+          // Not JSON, write as terminal output
+        }
+      }
+
+      // Regular terminal output
       if (xtermRef.current) {
         xtermRef.current.write(event.data);
       }
@@ -40,6 +70,7 @@ export default function Terminal({ className }: TerminalProps) {
 
     ws.onclose = () => {
       setConnected(false);
+      connectedToSpriteRef.current = false;
       wsRef.current = null;
       // Reconnect after 2 seconds
       reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
@@ -50,7 +81,7 @@ export default function Terminal({ className }: TerminalProps) {
     };
 
     wsRef.current = ws;
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -100,16 +131,16 @@ export default function Terminal({ className }: TerminalProps) {
 
     xtermRef.current = xterm;
 
-    // Handle input
+    // Handle input - only send if connected to sprite
     xterm.onData((data) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
+      if (wsRef.current?.readyState === WebSocket.OPEN && connectedToSpriteRef.current) {
         wsRef.current.send(data);
       }
     });
 
-    // Handle resize
+    // Handle resize - only send if connected to sprite
     xterm.onResize(({ cols, rows }) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
+      if (wsRef.current?.readyState === WebSocket.OPEN && connectedToSpriteRef.current) {
         wsRef.current.send(JSON.stringify({ type: 'resize', cols, rows }));
       }
     });
@@ -152,10 +183,12 @@ export default function Terminal({ className }: TerminalProps) {
   return (
     <div className={`terminal-container ${className || ''}`}>
       <div className="terminal-header">
-        <span className="terminal-title">TERMINAL</span>
+        <span className="terminal-title">
+          TERMINAL {spriteName && <span className="terminal-sprite-name">({spriteName})</span>}
+        </span>
         <span
           className={`connection-dot ${connected ? 'connected' : 'disconnected'}`}
-          title={connected ? 'Connected' : 'Disconnected'}
+          title={connected ? `Connected to ${spriteName}` : 'Disconnected'}
         />
       </div>
       <div className="terminal-content" ref={terminalRef} />

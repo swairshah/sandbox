@@ -6,73 +6,40 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import uvicorn
 import asyncio
+import signal
 import os
 import json
 import uuid
 from config import get_settings
 from routes import auth_router, chat_router
 from routes.files import router as files_router
-from file_manager import get_file_watcher, list_directory, FileEvent
+from routes.preview import router as preview_router
 from terminal import terminal_session
-
-# Use sandbox_manager on Modal, sessions locally
-IS_MODAL = os.environ.get("MODAL_ENVIRONMENT") is not None
-
-if IS_MODAL:
-    import sandbox_manager
-    async def get_response(message: str, user_id: str):
-        return await sandbox_manager.send_message(user_id, message)
-    async def clear_session(user_id: str):
-        return await sandbox_manager.clear_session(user_id)
-    # Queue functions not available in Modal mode
-    enqueue_message = None
-    set_response_callback = None
-    start_queue_processor = None
-    get_queue_status = None
-else:
-    from sessions import (
-        get_response,
-        clear_session,
-        enqueue_message,
-        set_response_callback,
-        start_queue_processor,
-        get_queue_status,
-    )
-
-
-# Store active file watcher WebSocket connections
-_file_ws_connections: set[WebSocket] = set()
+from remote_files import RemoteFileManager
+from sprite_sessions import get_session_manager, cleanup_session_manager
+from database import close_database
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifespan - start/stop file watcher."""
+    """Manage application lifespan - start/stop services."""
     # Startup
-    loop = asyncio.get_event_loop()
-    file_watcher = get_file_watcher()
-    file_watcher.start(loop)
-
-    # Subscribe to file events and broadcast to all connected WebSockets
-    def broadcast_file_event(event: FileEvent):
-        """Broadcast file event to all connected WebSocket clients."""
-        if _file_ws_connections:
-            event_data = {
-                "type": "file_event",
-                **event.to_dict()
-            }
-            # Schedule broadcast for each connection
-            for ws in list(_file_ws_connections):
-                try:
-                    asyncio.create_task(ws.send_json(event_data))
-                except Exception:
-                    pass
-
-    file_watcher.subscribe(broadcast_file_event)
+    # Initialize sprite session manager
+    await get_session_manager()
 
     yield
 
     # Shutdown
-    file_watcher.stop()
+    print("Shutting down...")
+    try:
+        await asyncio.wait_for(cleanup_session_manager(), timeout=5.0)
+    except asyncio.TimeoutError:
+        print("Session cleanup timed out")
+    try:
+        await asyncio.wait_for(close_database(), timeout=2.0)
+    except asyncio.TimeoutError:
+        print("Database close timed out")
+    print("Shutdown complete")
 
 
 app = FastAPI(
@@ -95,6 +62,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(files_router)
+app.include_router(preview_router, prefix="/api")
 
 
 # Public chat endpoint for web UI (no auth required)
@@ -107,9 +75,8 @@ class WebChatRequest(BaseModel):
 async def web_chat(request: WebChatRequest):
     """Public chat endpoint for web UI."""
     try:
-        response_text, session_id, tool_events = await get_response(
-            request.message, request.user_id
-        )
+        manager = await get_session_manager()
+        response_text, tool_uses = await manager.chat(request.user_id, request.message)
 
         if not response_text:
             return {"content": "No response generated (empty result)", "user_id": request.user_id}
@@ -117,22 +84,24 @@ async def web_chat(request: WebChatRequest):
         return {
             "content": response_text,
             "user_id": request.user_id,
-            "tool_events": tool_events,
-            "session_id": session_id,
+            "tool_events": tool_uses,
         }
 
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
         print(f"Chat error: {error_details}")
-        await clear_session(request.user_id)
+        # Cleanup session on error
+        manager = await get_session_manager()
+        await manager.cleanup_session(request.user_id)
         return {"content": f"Error: {type(e).__name__}: {str(e)}", "user_id": request.user_id}
 
 
 @app.post("/chat/clear")
 async def clear_chat(request: WebChatRequest):
-    """Clear chat history for a user."""
-    await clear_session(request.user_id)
+    """Start a new conversation for a user."""
+    manager = await get_session_manager()
+    await manager.new_conversation(request.user_id)
     return {"status": "cleared", "user_id": request.user_id}
 
 
@@ -141,70 +110,83 @@ async def health():
     return {"status": "healthy"}
 
 
-# WebSocket endpoint for queued message processing
+@app.get("/api/sprite/{user_id}")
+async def get_sprite_info(user_id: str):
+    """Get sprite info for a user (for iframe previews)."""
+    manager = await get_session_manager()
+    session = await manager.get_or_create_session(user_id)
+    user = await manager.db.get_user(user_id)
+
+    return {
+        "user_id": user_id,
+        "sprite_name": session.sprite_name,
+        "sprite_url": user.sprite_url if user else None,
+    }
+
+
+@app.get("/api/conversations/{user_id}")
+async def get_user_conversations(user_id: str, limit: int = 10):
+    """Get a user's conversation list."""
+    manager = await get_session_manager()
+    conversations = await manager.db.get_user_conversations(user_id, limit)
+    return {
+        "conversations": [
+            {
+                "id": c.id,
+                "session_id": c.session_id,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+            }
+            for c in conversations
+        ]
+    }
+
+
+# WebSocket endpoint for real-time chat
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     """
-    WebSocket endpoint for real-time chat with message queue.
+    WebSocket endpoint for real-time chat with streaming responses.
 
     Client sends JSON messages:
-    - {"type": "connect", "user_id": "...", "session_id": "..."}
+    - {"type": "connect", "user_id": "..."}
     - {"type": "message", "content": "...", "message_id": "..."}
-    - {"type": "status"} - get queue status
+    - {"type": "history"} - get conversation history
+    - {"type": "new_conversation"} - start fresh conversation
 
     Server sends JSON responses:
-    - {"type": "connected", "user_id": "..."}
-    - {"type": "queued", "message_id": "...", "queue_position": N}
-    - {"type": "processing_started", "message_id": "..."}
-    - {"type": "response", "message_id": "...", "content": "...", ...}
+    - {"type": "connected", "user_id": "...", "sprite_name": "..."}
+    - {"type": "processing", "message_id": "..."}
+    - {"type": "text", "message_id": "...", "content": "..."}
+    - {"type": "tool_use", "message_id": "...", "name": "...", "input": {...}}
+    - {"type": "tool_result", "message_id": "...", "content": "...", "is_error": bool}
+    - {"type": "done", "message_id": "...", "content": "...", "tool_uses": [...]}
     - {"type": "error", "message_id": "...", "error": "..."}
-    - {"type": "cancelled", "message_id": "...", "reason": "..."}
+    - {"type": "history", "messages": [...]}
     """
-    if IS_MODAL:
-        await websocket.close(code=4000, reason="WebSocket not supported in Modal mode")
-        return
-
     await websocket.accept()
     user_id: str | None = None
-    session_id: str | None = None
-
-    async def send_response(data: dict):
-        """Callback to send responses back to the WebSocket client."""
-        try:
-            await websocket.send_json(data)
-        except Exception as e:
-            print(f"Error sending WebSocket message: {e}")
+    manager = await get_session_manager()
 
     try:
         while True:
-            # Receive message from client
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)
             except json.JSONDecodeError:
-                await websocket.send_json({
-                    "type": "error",
-                    "error": "Invalid JSON"
-                })
+                await websocket.send_json({"type": "error", "error": "Invalid JSON"})
                 continue
 
             msg_type = msg.get("type")
 
             if msg_type == "connect":
-                # Initialize connection with user_id
                 user_id = msg.get("user_id", f"guest_{uuid.uuid4().hex[:8]}")
-                session_id = msg.get("session_id")
-
-                # Set up the response callback for this user
-                set_response_callback(user_id, send_response)
-
-                # Start the queue processor if not running
-                start_queue_processor(user_id)
+                session = await manager.get_or_create_session(user_id)
 
                 await websocket.send_json({
                     "type": "connected",
                     "user_id": user_id,
-                    "session_id": session_id
+                    "sprite_name": session.sprite_name,
                 })
 
             elif msg_type == "message":
@@ -217,42 +199,83 @@ async def websocket_chat(websocket: WebSocket):
 
                 content = msg.get("content", "").strip()
                 if not content:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": "Empty message"
-                    })
+                    await websocket.send_json({"type": "error", "error": "Empty message"})
                     continue
 
-                # Generate message_id if not provided
                 message_id = msg.get("message_id", f"msg_{uuid.uuid4().hex[:8]}")
 
-                # Enqueue the message
-                result = await enqueue_message(
-                    message_id=message_id,
-                    content=content,
-                    user_id=user_id,
-                    session_id=session_id
-                )
+                # Notify client we're processing
+                await websocket.send_json({"type": "processing", "message_id": message_id})
 
-                # Send queue status back to client
-                await websocket.send_json({
-                    "type": "queued",
-                    **result
-                })
+                try:
+                    # Stream responses back to client
+                    async def send_text(t):
+                        print(f"[ws] sending text: {t[:30]}...")
+                        await websocket.send_json({"type": "text", "message_id": message_id, "content": t})
 
-            elif msg_type == "status":
-                if not user_id:
+                    async def send_tool_use(t):
+                        print(f"[ws] sending tool_use: {t['name']}")
+                        await websocket.send_json({"type": "tool_use", "message_id": message_id, **t})
+
+                    async def send_tool_result(r):
+                        print(f"[ws] sending tool_result")
+                        await websocket.send_json({
+                            "type": "tool_result",
+                            "message_id": message_id,
+                            "content": r.content,
+                            "is_error": r.is_error
+                        })
+
+                    response_text, tool_uses = await manager.chat(
+                        user_id=user_id,
+                        message=content,
+                        on_text=lambda t: asyncio.create_task(send_text(t)),
+                        on_tool_use=lambda t: asyncio.create_task(send_tool_use(t)),
+                        on_tool_result=lambda r: asyncio.create_task(send_tool_result(r)),
+                    )
+
+                    print(f"[ws] sending response message")
+                    await websocket.send_json({
+                        "type": "response",
+                        "message_id": message_id,
+                        "content": response_text,
+                        "tool_events": tool_uses,
+                    })
+                    print(f"[ws] response message sent")
+
+                except Exception as e:
                     await websocket.send_json({
                         "type": "error",
-                        "error": "Not connected"
+                        "message_id": message_id,
+                        "error": str(e)
                     })
+
+            elif msg_type == "history":
+                if not user_id:
+                    await websocket.send_json({"type": "error", "error": "Not connected"})
                     continue
 
-                status = get_queue_status(user_id)
+                messages = await manager.get_conversation_history(user_id)
                 await websocket.send_json({
-                    "type": "status",
-                    **status
+                    "type": "history",
+                    "messages": [
+                        {
+                            "role": m.role,
+                            "content": m.content,
+                            "tool_uses": m.tool_uses,
+                            "created_at": m.created_at.isoformat() if m.created_at else None
+                        }
+                        for m in messages
+                    ]
                 })
+
+            elif msg_type == "new_conversation":
+                if not user_id:
+                    await websocket.send_json({"type": "error", "error": "Not connected"})
+                    continue
+
+                await manager.new_conversation(user_id)
+                await websocket.send_json({"type": "conversation_cleared"})
 
             else:
                 await websocket.send_json({
@@ -264,34 +287,57 @@ async def websocket_chat(websocket: WebSocket):
         print(f"WebSocket disconnected for user: {user_id}")
     except Exception as e:
         print(f"WebSocket error: {e}")
-    finally:
-        # Clean up callback when disconnected
-        if user_id:
-            set_response_callback(user_id, None)
 
 
 # WebSocket endpoint for real-time file system updates
 @app.websocket("/ws/files")
 async def websocket_files(websocket: WebSocket):
     """
-    WebSocket endpoint for real-time file system updates.
+    WebSocket endpoint for remote file system browsing via sprite.
 
-    Client sends JSON messages:
-    - {"type": "subscribe"} - Start receiving file events
-    - {"type": "get_tree", "path": "..."} - Get directory tree
+    Protocol:
+    - First message must be JSON: {"type": "connect", "user_id": "..."}
+    - Client sends JSON: {"type": "get_tree", "path": "..."}
+    - Client sends JSON: {"type": "refresh"}
 
     Server sends JSON responses:
-    - {"type": "subscribed"}
+    - {"type": "connected", "sprite_name": "..."}
     - {"type": "tree", "data": {...}}
-    - {"type": "file_event", "event_type": "created|deleted|modified|moved", ...}
+    - {"type": "error", "error": "..."}
     """
     await websocket.accept()
-    _file_ws_connections.add(websocket)
+    file_manager: RemoteFileManager | None = None
 
     try:
+        # First message should be connect with user_id
+        first_msg = await websocket.receive_text()
+        try:
+            msg = json.loads(first_msg)
+            if msg.get("type") != "connect" or not msg.get("user_id"):
+                await websocket.send_json({
+                    "type": "error",
+                    "error": "First message must be connect with user_id"
+                })
+                return
+
+            user_id = msg["user_id"]
+        except json.JSONDecodeError:
+            await websocket.send_json({"type": "error", "error": "Invalid JSON"})
+            return
+
+        # Get user's sprite
+        manager = await get_session_manager()
+        session = await manager.get_or_create_session(user_id)
+        file_manager = RemoteFileManager(session.sprite)
+
+        await websocket.send_json({
+            "type": "connected",
+            "sprite_name": session.sprite_name
+        })
+
         # Send initial directory tree
         try:
-            tree = list_directory("")
+            tree = file_manager.list_directory("")
             await websocket.send_json({
                 "type": "tree",
                 "data": tree.to_dict()
@@ -318,7 +364,7 @@ async def websocket_files(websocket: WebSocket):
             if msg_type == "get_tree":
                 path = msg.get("path", "")
                 try:
-                    tree = list_directory(path)
+                    tree = file_manager.list_directory(path)
                     await websocket.send_json({
                         "type": "tree",
                         "data": tree.to_dict()
@@ -333,8 +379,28 @@ async def websocket_files(websocket: WebSocket):
                         "type": "error",
                         "error": str(e)
                     })
+                except Exception as e:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": f"Failed to get tree: {str(e)}"
+                    })
+
+            elif msg_type == "refresh":
+                # Refresh the full tree
+                try:
+                    tree = file_manager.list_directory("")
+                    await websocket.send_json({
+                        "type": "tree",
+                        "data": tree.to_dict()
+                    })
+                except Exception as e:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": f"Failed to refresh: {str(e)}"
+                    })
 
             elif msg_type == "subscribe":
+                # For compatibility - just acknowledge
                 await websocket.send_json({"type": "subscribed"})
 
             else:
@@ -347,17 +413,16 @@ async def websocket_files(websocket: WebSocket):
         print("File watcher WebSocket disconnected")
     except Exception as e:
         print(f"File watcher WebSocket error: {e}")
-    finally:
-        _file_ws_connections.discard(websocket)
 
 
-# WebSocket endpoint for PTY terminal
+# WebSocket endpoint for remote terminal via sprite
 @app.websocket("/ws/terminal")
 async def websocket_terminal(websocket: WebSocket):
     """
-    WebSocket endpoint for PTY terminal access.
+    WebSocket endpoint for remote terminal access via sprite.
 
     Protocol:
+    - First message must be JSON: {"type": "connect", "user_id": "..."}
     - Client sends raw text input (keystrokes)
     - Client sends JSON for control: {"type": "resize", "cols": N, "rows": N}
     - Server sends raw text output (terminal output)
@@ -371,7 +436,29 @@ async def websocket_terminal(websocket: WebSocket):
         return await websocket.receive_text()
 
     try:
-        await terminal_session(websocket, send_json, receive_text)
+        # First message should be connect with user_id
+        first_msg = await websocket.receive_text()
+        try:
+            msg = json.loads(first_msg)
+            if msg.get("type") != "connect" or not msg.get("user_id"):
+                await send_json({"type": "error", "message": "First message must be connect with user_id"})
+                return
+
+            user_id = msg["user_id"]
+        except json.JSONDecodeError:
+            await send_json({"type": "error", "message": "Invalid JSON"})
+            return
+
+        # Get user's sprite name
+        manager = await get_session_manager()
+        session = await manager.get_or_create_session(user_id)
+        sprite_name = session.sprite_name
+
+        await send_json({"type": "connected", "sprite_name": sprite_name})
+
+        # Start remote terminal session
+        await terminal_session(websocket, send_json, receive_text, sprite_name)
+
     except WebSocketDisconnect:
         print("Terminal WebSocket disconnected")
     except Exception as e:

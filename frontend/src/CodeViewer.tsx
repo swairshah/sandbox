@@ -14,6 +14,7 @@ interface FileData {
 }
 
 interface CodeViewerProps {
+  userId: string;
   filePath: string | null;
   readOnly?: boolean;
   onClose?: () => void;
@@ -79,7 +80,7 @@ function getLanguage(filename: string, extension: string): string {
   return extensionToLanguage[extension.toLowerCase()] || 'plaintext';
 }
 
-export default function CodeViewer({ filePath, readOnly = true, onClose }: CodeViewerProps) {
+export default function CodeViewer({ userId, filePath, readOnly = true, onClose }: CodeViewerProps) {
   const [fileData, setFileData] = useState<FileData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +91,9 @@ export default function CodeViewer({ filePath, readOnly = true, onClose }: CodeV
     setError(null);
 
     try {
-      const response = await fetch(`/api/files/read?path=${encodeURIComponent(path)}`);
+      const response = await fetch(
+        `/api/files/read?user_id=${encodeURIComponent(userId)}&path=${encodeURIComponent(path)}`
+      );
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ detail: 'Failed to load file' }));
@@ -105,7 +108,7 @@ export default function CodeViewer({ filePath, readOnly = true, onClose }: CodeV
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [userId]);
 
   // Load file when path changes
   useEffect(() => {
