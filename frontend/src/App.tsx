@@ -41,6 +41,7 @@ interface WebSocketMessage {
   queue_size?: number;
   max_queue_size?: number;
   action?: string;
+  messages?: Array<{ role: string; content: string; tool_uses?: ToolEvent[]; created_at?: string }>;
 }
 
 function getInitialTheme(): boolean {
@@ -146,6 +147,46 @@ export default function App() {
           case "connected":
             setWsConnected(true);
             setError(null);
+            // request chat history
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: "history" }));
+            }
+            break;
+
+          case "history":
+            // load messages from database
+            if (data.messages && Array.isArray(data.messages)) {
+              const loadedMessages: Message[] = [];
+              for (const m of data.messages as Array<{ role: string; content: string; tool_uses?: ToolEvent[] }>) {
+                if (m.role === "user") {
+                  loadedMessages.push({
+                    id: generateId(),
+                    type: "user",
+                    content: m.content,
+                    status: "completed",
+                  });
+                } else if (m.role === "assistant") {
+                  if (m.tool_uses) {
+                    for (const t of m.tool_uses) {
+                      loadedMessages.push({
+                        id: generateId(),
+                        type: "tool",
+                        content: "",
+                        tool: t,
+                      });
+                    }
+                  }
+                  if (m.content) {
+                    loadedMessages.push({
+                      id: generateId(),
+                      type: "assistant",
+                      content: m.content,
+                    });
+                  }
+                }
+              }
+              setMessages(loadedMessages);
+            }
             break;
 
           case "queued":
