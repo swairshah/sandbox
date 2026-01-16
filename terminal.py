@@ -67,6 +67,8 @@ class RemoteTerminal:
             except json.JSONDecodeError:
                 pass  # Might be raw output already
 
+            # send clear to hide shell init noise
+            await self.ws.send(b"clear\n")
             return True
 
         except Exception as e:
