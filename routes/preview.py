@@ -103,14 +103,16 @@ async def proxy_to_sprite(user_id: str, path: str, request: Request):
     # Get request body if present
     body = await request.body()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         try:
+            # disable automatic decompression so we handle it ourselves
+            headers.pop("accept-encoding", None)
+            headers.pop("Accept-Encoding", None)
             response = await client.request(
                 method=request.method,
                 url=target_url,
                 headers=headers,
                 content=body if body else None,
-                follow_redirects=True,
             )
 
             # Filter response headers
