@@ -266,7 +266,7 @@ async def websocket_chat(websocket: WebSocket):
                             "role": m.role,
                             "content": m.content,
                             "tool_uses": m.tool_uses,
-                            "created_at": m.created_at.isoformat() if m.created_at else None
+                            "created_at": m.created_at.isoformat() if hasattr(m.created_at, 'isoformat') else m.created_at
                         }
                         for m in messages
                     ]
