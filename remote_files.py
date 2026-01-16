@@ -91,22 +91,15 @@ class RemoteFileManager:
 
     def _run_cmd(self, cmd: str) -> tuple[str, int]:
         """Run a command on the sprite and return (output, exit_code)."""
+        from sprites.exceptions import ExitError
         try:
-            # Wrap command to always succeed and capture exit code
-            wrapped_cmd = f'({cmd}); echo "EXIT_CODE:$?"'
-            result = self.sprite.command("bash", "-c", wrapped_cmd)
-            output = result.combined_output().decode("utf-8", errors="replace")
-
-            # Parse exit code from output
-            if "EXIT_CODE:" in output:
-                parts = output.rsplit("EXIT_CODE:", 1)
-                actual_output = parts[0]
-                try:
-                    exit_code = int(parts[1].strip())
-                except ValueError:
-                    exit_code = 0
-                return actual_output, exit_code
-            return output, 0
+            result = self.sprite.command("bash", "-c", cmd)
+            try:
+                output = result.combined_output().decode("utf-8", errors="replace")
+                return output, 0
+            except ExitError as e:
+                output = (e.stdout or b"").decode("utf-8", errors="replace")
+                return output, e.exit_code
         except Exception as e:
             print(f"[remote_files] command exception: {cmd!r} -> {e}")
             return str(e), 1
