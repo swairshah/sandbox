@@ -255,6 +255,12 @@ export default function App() {
               processing: data.is_processing ?? false,
             });
             break;
+
+          case "text":
+          case "tool_use":
+          case "tool_result":
+            // streaming messages - ignore since response has everything
+            break;
         }
       } catch (e) {
         console.error("Failed to parse WebSocket message:", e);
