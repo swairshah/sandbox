@@ -22,6 +22,7 @@ interface ToolEvent {
   input?: unknown;
   tool_use_id?: string;
   content?: unknown;
+  result?: unknown;
   is_error?: boolean;
 }
 
@@ -603,17 +604,20 @@ export default function App() {
                 {msg.type === "tool" && msg.tool ? (
                   msg.tool.type === "tool_use" ? (
                     <div className="tool-use">
-                      <div className="tool-name">tool: {msg.tool.name}</div>
-                      <div className="tool-input">
-                        {JSON.stringify(msg.tool.input ?? {}, null, 2)}
+                      <div className="tool-name">
+                        tool: {msg.tool.name}
+                        <span className="tool-input-preview">
+                          {JSON.stringify(msg.tool.input ?? {}).slice(0, 80)}
+                          {JSON.stringify(msg.tool.input ?? {}).length > 80 ? "..." : ""}
+                        </span>
                       </div>
                     </div>
-                  ) : (
+                  ) : msg.tool.result ? (
                     <div className="tool-result">
-                      {JSON.stringify(msg.tool.content ?? "", null, 2)}
+                      {typeof msg.tool.result === "string" ? msg.tool.result : JSON.stringify(msg.tool.result, null, 2)}
                     </div>
-                  )
-                ) : (
+                  ) : null
+                ) : msg.content ? (
                   <>
                     <div className="message-content">{msg.content}</div>
                     {msg.type === "user" && msg.status && msg.status !== "completed" && (
@@ -641,7 +645,7 @@ export default function App() {
                       </div>
                     )}
                   </>
-                )}
+                ) : null}
               </div>
             ))}
 
