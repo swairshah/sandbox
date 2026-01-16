@@ -441,9 +441,11 @@ async def websocket_terminal(websocket: WebSocket):
     try:
         # First message should be connect with user_id
         first_msg = await websocket.receive_text()
+        print(f"[terminal] First message received: {first_msg[:200]}")
         try:
             msg = json.loads(first_msg)
             if msg.get("type") != "connect" or not msg.get("user_id"):
+                print(f"[terminal] Invalid connect: type={msg.get('type')}, user_id={msg.get('user_id')}")
                 await send_json({"type": "error", "message": "First message must be connect with user_id"})
                 return
 

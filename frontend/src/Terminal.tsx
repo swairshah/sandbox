@@ -28,6 +28,7 @@ export default function Terminal({ className, userId }: TerminalProps) {
 
     ws.onopen = () => {
       // Send connect message with user_id first
+      console.log('[Terminal] Sending connect with userId:', userId);
       ws.send(JSON.stringify({ type: 'connect', user_id: userId }));
     };
 
