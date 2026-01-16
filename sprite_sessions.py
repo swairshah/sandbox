@@ -96,9 +96,12 @@ class SpriteToolProvider:
 
         def _run_cmd_stdin(cmd: str, stdin_data: bytes) -> tuple[str, int]:
             """Execute a command with stdin via sprite.command."""
+            import io
+            from sprites.exec import Cmd
             try:
-                output = sprite.command("bash", "-c", cmd).stdin(stdin_data).combined_output()
-                return output.decode(), 0
+                cmd_obj = Cmd(sprite, ["bash", "-c", cmd], stdin=io.BytesIO(stdin_data))
+                cmd_obj.run()
+                return "", 0
             except Exception as e:
                 return str(e), 1
 
@@ -436,7 +439,7 @@ class SpriteSessionManager:
                     elif isinstance(block, ToolUseBlock):
                         print(f"[chat] ToolUseBlock: name={block.name}, id={block.id}")
                         print(f"[chat] ToolUseBlock input: {block.input}")
-                        tool_use = {"name": block.name, "input": block.input, "id": block.id}
+                        tool_use = {"type": "tool_use", "name": block.name, "input": block.input, "id": block.id}
                         tool_uses.append(tool_use)
                         if on_tool_use:
                             on_tool_use(tool_use)
