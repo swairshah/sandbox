@@ -17,6 +17,7 @@ interface CodeViewerProps {
   filePath: string | null;
   readOnly?: boolean;
   onClose?: () => void;
+  userId?: string;
 }
 
 // Map file extensions to highlight.js language names
@@ -79,7 +80,7 @@ function getLanguage(filename: string, extension: string): string {
   return extensionToLanguage[extension.toLowerCase()] || 'plaintext';
 }
 
-export default function CodeViewer({ filePath, readOnly = true, onClose }: CodeViewerProps) {
+export default function CodeViewer({ filePath, readOnly = true, onClose, userId }: CodeViewerProps) {
   const [fileData, setFileData] = useState<FileData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +91,14 @@ export default function CodeViewer({ filePath, readOnly = true, onClose }: CodeV
     setError(null);
 
     try {
-      const response = await fetch(`/api/files/read?path=${encodeURIComponent(path)}`);
+      const headers: Record<string, string> = {};
+      if (userId) {
+        headers['X-User-Id'] = userId;
+      }
+      
+      const response = await fetch(`/api/files/read?path=${encodeURIComponent(path)}`, {
+        headers,
+      });
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ detail: 'Failed to load file' }));
@@ -105,7 +113,7 @@ export default function CodeViewer({ filePath, readOnly = true, onClose }: CodeV
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [userId]);
 
   // Load file when path changes
   useEffect(() => {
