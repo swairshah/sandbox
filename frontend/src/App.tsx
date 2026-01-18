@@ -504,7 +504,7 @@ export default function App() {
       <div className="main-layout">
         {sidebarOpen && (
           <aside className="sidebar">
-            <FileExplorer onFileSelect={handleFileSelect} />
+            <FileExplorer onFileSelect={handleFileSelect} userId={userId} />
           </aside>
         )}
 
@@ -635,7 +635,7 @@ export default function App() {
           </div>
 
           <div className={`panel-content ${activePanel === "terminal" ? "active" : ""}`}>
-            <Terminal />
+            <Terminal userId={userId} />
           </div>
 
           <div className={`panel-content ${activePanel === "viewer" ? "active" : ""}`}>

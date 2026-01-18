@@ -6,9 +6,10 @@ import 'xterm/css/xterm.css';
 
 interface TerminalProps {
   className?: string;
+  userId?: string;
 }
 
-export default function Terminal({ className }: TerminalProps) {
+export default function Terminal({ className, userId }: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -24,15 +25,33 @@ export default function Terminal({ className }: TerminalProps) {
     const ws = new WebSocket(`${protocol}//${host}/ws/terminal`);
 
     ws.onopen = () => {
-      setConnected(true);
-      // Send initial size
-      if (xtermRef.current) {
-        const { cols, rows } = xtermRef.current;
-        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-      }
+      // Send connect message with user_id first
+      const effectiveUserId = userId || `guest_${Math.random().toString(36).slice(2, 10)}`;
+      ws.send(JSON.stringify({ type: 'connect', user_id: effectiveUserId }));
     };
 
     ws.onmessage = (event) => {
+      // Check for JSON messages (connect response, errors)
+      if (event.data.startsWith('{')) {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'connected') {
+            setConnected(true);
+            // Send initial size after connected
+            if (xtermRef.current) {
+              const { cols, rows } = xtermRef.current;
+              ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+            }
+            return;
+          } else if (msg.type === 'error') {
+            console.error('Terminal error:', msg.error);
+            return;
+          }
+        } catch {
+          // Not JSON, treat as terminal output
+        }
+      }
+      // Terminal output
       if (xtermRef.current) {
         xtermRef.current.write(event.data);
       }
@@ -50,7 +69,7 @@ export default function Terminal({ className }: TerminalProps) {
     };
 
     wsRef.current = ws;
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     if (!terminalRef.current) return;

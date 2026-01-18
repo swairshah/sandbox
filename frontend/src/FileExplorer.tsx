@@ -17,6 +17,7 @@ interface FileEvent {
 interface FileExplorerProps {
   onFileDragStart?: (path: string) => void;
   onFileSelect?: (path: string, isDirectory: boolean) => void;
+  userId?: string;
 }
 
 // File type icons (using unicode/emoji for simplicity, can be replaced with SVG)
@@ -134,7 +135,7 @@ function TreeNode({ node, depth, expandedPaths, onToggle, onDragStart, onFileSel
   );
 }
 
-export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExplorerProps) {
+export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: FileExplorerProps) {
   const [tree, setTree] = useState<FileNode | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set(['.']));
   const [connected, setConnected] = useState(false);
@@ -150,21 +151,27 @@ export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExpl
     const ws = new WebSocket(`${protocol}//${host}/ws/files`);
 
     ws.onopen = () => {
-      setConnected(true);
-      setError(null);
-      ws.send(JSON.stringify({ type: 'subscribe' }));
+      // Send connect message with user_id first
+      const effectiveUserId = userId || `guest_${Math.random().toString(36).slice(2, 10)}`;
+      ws.send(JSON.stringify({ type: 'connect', user_id: effectiveUserId }));
     };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
 
-        if (data.type === 'tree') {
+        if (data.type === 'connected') {
+          setConnected(true);
+          setError(null);
+          // Subscribe after connected
+          ws.send(JSON.stringify({ type: 'subscribe' }));
+        } else if (data.type === 'tree') {
           setTree(data.data);
         } else if (data.type === 'file_event') {
           handleFileEvent(data as FileEvent);
         } else if (data.type === 'error') {
           console.error('File WebSocket error:', data.error);
+          setError(data.error);
         }
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);
@@ -184,7 +191,7 @@ export default function FileExplorer({ onFileDragStart, onFileSelect }: FileExpl
     };
 
     wsRef.current = ws;
-  }, []);
+  }, [userId]);
 
   const handleFileEvent = (event: FileEvent) => {
     // Request fresh tree on any file event
