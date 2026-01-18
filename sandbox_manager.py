@@ -4,6 +4,12 @@ Each user gets their own isolated sandbox with:
 - Their own Claude Code instance
 - Their own persistent volume at /workspace
 - Their own session state
+
+Architecture:
+- Modal Dict stores user_id -> sandbox_object_id mapping (persistent across instances)
+- Only chat can create sandboxes (via get_or_create_sandbox)
+- File explorer and terminal can only lookup existing sandboxes (via lookup_sandbox)
+- Uses Sandbox.from_id() which is more reliable than from_name()
 """
 
 import modal
@@ -26,8 +32,12 @@ _secrets: Optional[list] = None
 # Shared code volume (contains sandbox_server.py)
 _code_volume: Optional[modal.Volume] = None
 
-# Track active sandboxes: user_id -> (sandbox, tunnel_url)
-_active_sandboxes: dict[str, tuple[modal.Sandbox, str]] = {}
+# Modal Dict for persistent sandbox ID storage (shared across all container instances)
+_sandbox_registry: Optional[modal.Dict] = None
+
+# Local cache: user_id -> (sandbox, http_url, terminal_url)
+# This is per-container, but Modal Dict is the source of truth
+_local_cache: dict[str, tuple[modal.Sandbox, str, str | None]] = {}
 
 
 def _run_exec(sb: modal.Sandbox, *args: str) -> tuple[str, str, int]:
@@ -124,108 +134,158 @@ def init(
     code_volume: Optional[modal.Volume] = None,
 ):
     """Initialize the sandbox manager with app and image references."""
-    global _app, _sandbox_image, _secrets, _code_volume
+    global _app, _sandbox_image, _secrets, _code_volume, _sandbox_registry
     _app = app
     _sandbox_image = sandbox_image
     _secrets = secrets or []
     _code_volume = code_volume
+    
+    # Initialize the Modal Dict for sandbox registry (persistent across instances)
+    _sandbox_registry = modal.Dict.from_name("monios-sandbox-registry", create_if_missing=True)
+    print(f"[sandbox_manager] Initialized sandbox registry")
+
+
+def _ensure_registry() -> modal.Dict:
+    """Ensure the sandbox registry is initialized and return it."""
+    global _sandbox_registry
+    if _sandbox_registry is None:
+        _sandbox_registry = modal.Dict.from_name("monios-sandbox-registry", create_if_missing=True)
+        print(f"[sandbox_manager] Lazily initialized sandbox registry")
+    return _sandbox_registry
+
+
+def _get_sandbox_from_registry(user_id: str) -> tuple[modal.Sandbox, str, str | None] | None:
+    """
+    Try to get sandbox from registry by ID.
+    Returns (sandbox, http_url, terminal_url) if found and running, None otherwise.
+    """
+    registry = _ensure_registry()
+    
+    try:
+        sandbox_id = registry.get(user_id)
+        if not sandbox_id:
+            print(f"[sandbox_manager] No sandbox ID in registry for {user_id}")
+            return None
+        
+        print(f"[sandbox_manager] Found sandbox ID in registry: {sandbox_id}")
+        sb = modal.Sandbox.from_id(sandbox_id)
+        
+        # Check if still running
+        if sb.poll() is not None:
+            print(f"[sandbox_manager] Sandbox {sandbox_id} is no longer running")
+            # Clean up stale entry
+            try:
+                del registry[user_id]
+            except Exception:
+                pass
+            return None
+        
+        # Get tunnel URLs
+        tunnels = sb.tunnels()
+        http_tunnel = tunnels.get(8080)
+        terminal_tunnel = tunnels.get(8081)
+        
+        if not http_tunnel:
+            print(f"[sandbox_manager] Sandbox found but no HTTP tunnel yet")
+            return None
+        
+        http_url = http_tunnel.url
+        terminal_url = terminal_tunnel.url if terminal_tunnel else None
+        print(f"[sandbox_manager] Got sandbox from registry: http={http_url}, terminal={terminal_url}")
+        return sb, http_url, terminal_url
+        
+    except Exception as e:
+        print(f"[sandbox_manager] Error getting sandbox from registry: {e}")
+        return None
+
+
+async def lookup_sandbox(user_id: str) -> tuple[modal.Sandbox, str, str | None] | None:
+    """
+    Lookup an existing sandbox for a user. Does NOT create one.
+    Used by file explorer and terminal which cannot create sandboxes.
+    
+    Returns (sandbox, http_url, terminal_url) if found, None if no sandbox exists.
+    """
+    global _local_cache
+    
+    print(f"[sandbox_manager] lookup_sandbox for user: {user_id}")
+    
+    # Check local cache first
+    if user_id in _local_cache:
+        sb, http_url, terminal_url = _local_cache[user_id]
+        if sb.poll() is None:
+            print(f"[sandbox_manager] Reusing cached sandbox for {user_id}")
+            return sb, http_url, terminal_url
+        else:
+            print(f"[sandbox_manager] Cached sandbox terminated for {user_id}")
+            del _local_cache[user_id]
+    
+    # Try to get from registry
+    result = _get_sandbox_from_registry(user_id)
+    if result:
+        _local_cache[user_id] = result
+        return result
+    
+    return None
 
 
 async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str, str | None]:
-    """Get existing sandbox or create new one for user. Returns (sandbox, http_url, terminal_url)."""
-    global _active_sandboxes
+    """
+    Get existing sandbox or create new one for user.
+    ONLY chat should call this function - it's the only one allowed to create sandboxes.
+    
+    Returns (sandbox, http_url, terminal_url).
+    """
+    global _local_cache
 
     print(f"[sandbox_manager] get_or_create_sandbox for user: {user_id}")
 
     if _sandbox_image is None:
         raise RuntimeError("sandbox_manager.init must set sandbox_image before creating sandboxes")
+    
+    # Ensure registry is initialized (lazy init if needed)
+    _ensure_registry()
 
-    sandbox_name = _sanitize_sandbox_name(user_id)
-    app_name = _app.name if _app else "monios-api"
-
-    # First, check local cache
-    if user_id in _active_sandboxes:
-        sb, http_url, terminal_url = _active_sandboxes[user_id]
-        # Check if still running
-        if sb.poll() is None:
-            print(f"[sandbox_manager] Reusing cached sandbox for {user_id}")
-            return sb, http_url, terminal_url
-        else:
-            # Sandbox terminated, remove from cache
-            print(f"[sandbox_manager] Cached sandbox terminated for {user_id}")
-            del _active_sandboxes[user_id]
-
-    # Helper to lookup existing sandbox and get its URLs
-    def _try_get_existing_sandbox():
-        try:
-            sb = modal.Sandbox.from_name(app_name, sandbox_name)
-            if sb.poll() is None:
-                print(f"[sandbox_manager] Found existing named sandbox for {user_id}: {sb.object_id}")
-                tunnels = sb.tunnels()
-                http_tunnel = tunnels.get(8080)
-                terminal_tunnel = tunnels.get(8081)
-                if http_tunnel:
-                    return sb, http_tunnel.url, terminal_tunnel.url if terminal_tunnel else None
-                print(f"[sandbox_manager] Named sandbox found but no tunnel")
-            else:
-                print(f"[sandbox_manager] Named sandbox exists but not running")
-        except modal.exception.NotFoundError:
-            print(f"[sandbox_manager] No existing named sandbox for {user_id}")
-        except Exception as e:
-            print(f"[sandbox_manager] Error looking up named sandbox: {e}")
-        return None
-
-    # Try to find existing named sandbox from Modal
-    result = _try_get_existing_sandbox()
+    # First try lookup (checks cache and registry)
+    result = await lookup_sandbox(user_id)
     if result:
-        sb, http_url, terminal_url = result
-        _active_sandboxes[user_id] = (sb, http_url, terminal_url)
-        print(f"[sandbox_manager] Reusing named sandbox: http={http_url}, terminal={terminal_url}")
-        return sb, http_url, terminal_url
+        return result
 
+    # No existing sandbox, create a new one
+    print(f"[sandbox_manager] Creating new sandbox for user: {user_id}")
+    
     # Create user's volume (persistent across sandbox restarts)
-    print(f"[sandbox_manager] Creating volume for user: {user_id}")
     user_volume = modal.Volume.from_name(
         _sanitize_volume_name(user_id),
         create_if_missing=True
     )
 
     # Create new sandbox with secrets for Claude API
-    print(f"[sandbox_manager] Creating named sandbox '{sandbox_name}' for user: {user_id}")
     volumes = {"/workspace": user_volume}
-    workdir = "/workspace"
     if _code_volume:
         volumes["/code"] = _code_volume
 
-    try:
-        sb = modal.Sandbox.create(
-            app=_app,
-            name=sandbox_name,  # Named sandbox for cross-instance lookup
-            image=_sandbox_image,
-            secrets=_secrets,
-            env={
-                "IS_SANDBOX": "1",
-                "HOME": "/workspace",
-            },
-            timeout=3600,  # 1 hour max lifetime
-            idle_timeout=300,  # 5 min idle = terminate
-            volumes=volumes,
-            cpu=1.0,
-            memory=512,
-            encrypted_ports=[8080, 8081],  # 8080=HTTP/files, 8081=terminal WebSocket
-        )
-    except modal.exception.AlreadyExistsError:
-        # Race condition: another request created the sandbox between our check and create
-        print(f"[sandbox_manager] Sandbox already exists (race condition), retrying lookup")
-        await asyncio.sleep(1)  # Give it a moment to initialize
-        result = _try_get_existing_sandbox()
-        if result:
-            sb, http_url, terminal_url = result
-            _active_sandboxes[user_id] = (sb, http_url, terminal_url)
-            return sb, http_url, terminal_url
-        else:
-            raise RuntimeError(f"Sandbox '{sandbox_name}' exists but cannot be accessed")
-    print(f"[sandbox_manager] Sandbox created: {sb.object_id}")
+    sb = modal.Sandbox.create(
+        app=_app,
+        image=_sandbox_image,
+        secrets=_secrets,
+        env={
+            "IS_SANDBOX": "1",
+            "HOME": "/workspace",
+        },
+        timeout=3600,  # 1 hour max lifetime
+        idle_timeout=300,  # 5 min idle = terminate
+        volumes=volumes,
+        cpu=1.0,
+        memory=512,
+        encrypted_ports=[8080, 8081],  # 8080=HTTP/files, 8081=terminal WebSocket
+    )
+    
+    # Store sandbox ID in registry immediately
+    sandbox_id = sb.object_id
+    print(f"[sandbox_manager] Sandbox created: {sandbox_id}")
+    _sandbox_registry[user_id] = sandbox_id
+    print(f"[sandbox_manager] Stored sandbox ID in registry")
 
     # Start the sandbox server inside (don't wait for it to complete)
     print(f"[sandbox_manager] Starting sandbox_server.py")
@@ -285,7 +345,7 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str, str |
     await _wait_for_ready(http_url)
 
     # Cache the sandbox with both URLs
-    _active_sandboxes[user_id] = (sb, http_url, terminal_url)
+    _local_cache[user_id] = (sb, http_url, terminal_url)
 
     return sb, http_url, terminal_url
 
@@ -347,10 +407,10 @@ async def send_message(user_id: str, message: str) -> tuple[str, str, list[dict[
 
 async def clear_session(user_id: str) -> bool:
     """Clear session for a user. Optionally terminate sandbox."""
-    if user_id not in _active_sandboxes:
+    if user_id not in _local_cache:
         return False
 
-    sb, tunnel_url, _ = _active_sandboxes[user_id]
+    sb, tunnel_url, _ = _local_cache[user_id]
 
     try:
         async with httpx.AsyncClient() as client:
@@ -363,15 +423,26 @@ async def clear_session(user_id: str) -> bool:
 
 async def terminate_sandbox(user_id: str) -> bool:
     """Terminate a user's sandbox completely."""
-    if user_id not in _active_sandboxes:
+    global _local_cache
+    
+    if user_id not in _local_cache:
         return False
 
-    sb, _, _ = _active_sandboxes[user_id]
+    sb, _, _ = _local_cache[user_id]
 
     try:
         sb.terminate()
     except:
         pass
 
-    del _active_sandboxes[user_id]
+    # Clean up local cache
+    del _local_cache[user_id]
+    
+    # Clean up registry
+    if _sandbox_registry is not None:
+        try:
+            del _sandbox_registry[user_id]
+        except Exception:
+            pass
+    
     return True

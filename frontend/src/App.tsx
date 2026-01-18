@@ -269,12 +269,16 @@ export default function App() {
     };
   }, [connectWebSocket]);
 
-  // Reconnect with new user_id when it changes
+  // Reconnect WebSocket and clear messages when userId changes
   useEffect(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "connect", user_id: userId }));
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+      setWsConnected(false);
+      setMessages([]); // Clear chat history for new user
+      connectWebSocket();
     }
-  }, [userId]);
+  }, [userId, connectWebSocket]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");

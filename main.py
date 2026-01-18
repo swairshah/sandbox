@@ -28,9 +28,16 @@ if IS_MODAL:
     import sandbox_manager
     import httpx
 
+    class SandboxNotReadyError(Exception):
+        """Raised when sandbox doesn't exist yet (user needs to send a message first)."""
+        pass
+
     async def _get_sandbox_file_tree(user_id: str, path: str = "") -> dict:
-        """Fetch file tree from user's sandbox."""
-        _, http_url, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+        """Fetch file tree from user's sandbox. Uses lookup_sandbox (read-only)."""
+        result = await sandbox_manager.lookup_sandbox(user_id)
+        if result is None:
+            raise SandboxNotReadyError("Sandbox not initialized. Please send a message first to start your session.")
+        _, http_url, _ = result
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{http_url}/files/list",
@@ -45,8 +52,11 @@ if IS_MODAL:
             return data.get("data", {})
 
     async def _read_sandbox_file(user_id: str, path: str) -> dict:
-        """Read file contents from user's sandbox."""
-        _, http_url, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+        """Read file contents from user's sandbox. Uses lookup_sandbox (read-only)."""
+        result = await sandbox_manager.lookup_sandbox(user_id)
+        if result is None:
+            raise SandboxNotReadyError("Sandbox not initialized. Please send a message first to start your session.")
+        _, http_url, _ = result
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{http_url}/files/read",
@@ -381,17 +391,6 @@ async def websocket_chat(websocket: WebSocket):
             set_response_callback(user_id, None)
 
 
-# Helper to get file tree from sandbox
-async def _get_sandbox_file_tree(user_id: str, path: str = "") -> dict:
-    """Fetch file tree from user's sandbox."""
-    _, http_url, _ = await sandbox_manager.get_or_create_sandbox(user_id)
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{http_url}/files/list", params={"path": path}, timeout=10.0)
-        if resp.status_code != 200:
-            raise Exception(f"Sandbox error: {resp.text}")
-        data = resp.json()
-        return data.get("data", {})
-
 
 # WebSocket endpoint for real-time file system updates
 @app.websocket("/ws/files")
@@ -560,8 +559,15 @@ async def websocket_terminal(websocket: WebSocket):
                             print(f"[terminal] Connecting user {user_id} to sandbox terminal...")
                             
                             try:
-                                # Get sandbox terminal URL
-                                _, _, terminal_url = await sandbox_manager.get_or_create_sandbox(user_id)
+                                # Get sandbox terminal URL (lookup only, don't create)
+                                result = await sandbox_manager.lookup_sandbox(user_id)
+                                if result is None:
+                                    await websocket.send_json({
+                                        "type": "error", 
+                                        "error": "Sandbox not initialized. Please send a message first to start your session."
+                                    })
+                                    continue
+                                _, _, terminal_url = result
                                 if not terminal_url:
                                     await websocket.send_json({"type": "error", "error": "Terminal not available"})
                                     continue

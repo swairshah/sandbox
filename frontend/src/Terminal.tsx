@@ -157,6 +157,16 @@ export default function Terminal({ className, userId }: TerminalProps) {
     };
   }, [connect]);
 
+  // Reconnect when userId changes
+  useEffect(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+      setConnected(false);
+      connect();
+    }
+  }, [userId, connect]);
+
   // Re-fit when visibility changes
   useEffect(() => {
     const handleVisibilityChange = () => {

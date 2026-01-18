@@ -214,6 +214,16 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
     };
   }, [connect]);
 
+  // Reconnect when userId changes
+  useEffect(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+      setConnected(false);
+      connect();
+    }
+  }, [userId, connect]);
+
   const handleToggle = (path: string) => {
     setExpandedPaths((prev) => {
       const next = new Set(prev);

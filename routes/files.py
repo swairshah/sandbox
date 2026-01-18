@@ -13,9 +13,16 @@ if IS_MODAL:
     import httpx
     import sandbox_manager
 
+    class SandboxNotReadyError(Exception):
+        """Raised when sandbox doesn't exist yet (user needs to send a message first)."""
+        pass
+
     async def _get_sandbox_file_tree(user_id: str, path: str = "") -> dict:
-        """Fetch file tree from user's sandbox."""
-        _, http_url, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+        """Fetch file tree from user's sandbox. Uses lookup_sandbox (read-only)."""
+        result = await sandbox_manager.lookup_sandbox(user_id)
+        if result is None:
+            raise SandboxNotReadyError("Sandbox not initialized. Please send a message first to start your session.")
+        _, http_url, _ = result
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{http_url}/files/list",
@@ -30,8 +37,11 @@ if IS_MODAL:
             return data.get("data", {})
 
     async def _read_sandbox_file(user_id: str, path: str) -> dict:
-        """Read file contents from user's sandbox."""
-        _, http_url, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+        """Read file contents from user's sandbox. Uses lookup_sandbox (read-only)."""
+        result = await sandbox_manager.lookup_sandbox(user_id)
+        if result is None:
+            raise SandboxNotReadyError("Sandbox not initialized. Please send a message first to start your session.")
+        _, http_url, _ = result
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{http_url}/files/read",
@@ -72,6 +82,8 @@ async def get_file_tree(
     except NotADirectoryError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        if IS_MODAL and isinstance(e, SandboxNotReadyError):
+            raise HTTPException(status_code=503, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -97,6 +109,8 @@ async def list_files(
     except NotADirectoryError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        if IS_MODAL and isinstance(e, SandboxNotReadyError):
+            raise HTTPException(status_code=503, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -138,4 +152,6 @@ async def read_file(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        if IS_MODAL and isinstance(e, SandboxNotReadyError):
+            raise HTTPException(status_code=503, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
