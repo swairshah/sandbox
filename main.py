@@ -15,15 +15,16 @@ from routes.files import router as files_router
 from file_manager import get_file_watcher, list_directory, FileEvent
 from terminal import terminal_session
 
-# Use sandbox_manager on Modal, sessions locally
+# Use modal_sessions on Modal, sessions locally
 IS_MODAL = os.environ.get("MODAL_ENVIRONMENT") is not None
 
 if IS_MODAL:
-    import sandbox_manager
-    async def get_response(message: str, user_id: str):
-        return await sandbox_manager.send_message(user_id, message)
-    async def clear_session(user_id: str):
-        return await sandbox_manager.clear_session(user_id)
+    from modal_sessions import (
+        get_response,
+        clear_session,
+        get_session_manager,
+        cleanup_session_manager,
+    )
     # Queue functions not available in Modal mode
     enqueue_message = None
     set_response_callback = None
@@ -43,11 +44,12 @@ else:
 # Store active file watcher WebSocket connections
 _file_ws_connections: set[WebSocket] = set()
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan - start/stop file watcher."""
     # Startup
+    if IS_MODAL:
+        await get_session_manager()
     loop = asyncio.get_event_loop()
     file_watcher = get_file_watcher()
     file_watcher.start(loop)
@@ -73,6 +75,8 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     file_watcher.stop()
+    if IS_MODAL:
+        await cleanup_session_manager()
 
 
 app = FastAPI(
@@ -161,7 +165,75 @@ async def websocket_chat(websocket: WebSocket):
     - {"type": "cancelled", "message_id": "...", "reason": "..."}
     """
     if IS_MODAL:
-        await websocket.close(code=4000, reason="WebSocket not supported in Modal mode")
+        await websocket.accept()
+        user_id: str | None = None
+
+        try:
+            while True:
+                data = await websocket.receive_text()
+                try:
+                    msg = json.loads(data)
+                except json.JSONDecodeError:
+                    await websocket.send_json({"type": "error", "error": "Invalid JSON"})
+                    continue
+
+                msg_type = msg.get("type")
+
+                if msg_type == "connect":
+                    user_id = msg.get("user_id", f"guest_{uuid.uuid4().hex[:8]}")
+                    await websocket.send_json({"type": "connected", "user_id": user_id})
+
+                elif msg_type == "message":
+                    if not user_id:
+                        await websocket.send_json({
+                            "type": "error",
+                            "error": "Not connected. Send connect message first."
+                        })
+                        continue
+
+                    content = msg.get("content", "").strip()
+                    if not content:
+                        await websocket.send_json({"type": "error", "error": "Empty message"})
+                        continue
+
+                    message_id = msg.get("message_id", f"msg_{uuid.uuid4().hex[:8]}")
+                    await websocket.send_json({"type": "processing_started", "message_id": message_id})
+
+                    try:
+                        response_text, session_id, tool_events = await get_response(
+                            content, user_id
+                        )
+                        await websocket.send_json({
+                            "type": "response",
+                            "message_id": message_id,
+                            "content": response_text,
+                            "tool_events": tool_events,
+                            "session_id": session_id,
+                        })
+                    except Exception as e:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message_id": message_id,
+                            "error": str(e),
+                        })
+
+                elif msg_type == "status":
+                    await websocket.send_json({
+                        "type": "status",
+                        "queue_size": 0,
+                        "max_queue_size": 0,
+                        "is_processing": False,
+                    })
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": f"Unknown message type: {msg_type}"
+                    })
+
+        except WebSocketDisconnect:
+            print(f"WebSocket disconnected for user: {user_id}")
+        except Exception as e:
+            print(f"WebSocket error: {e}")
         return
 
     await websocket.accept()

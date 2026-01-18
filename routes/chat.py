@@ -8,15 +8,11 @@ import os
 from auth.middleware import get_current_user
 from auth.jwt import TokenData
 
-# Use sandbox_manager on Modal, sessions locally
+# Use modal_sessions on Modal, sessions locally
 IS_MODAL = os.environ.get("MODAL_ENVIRONMENT") is not None
 
 if IS_MODAL:
-    import sandbox_manager
-    async def get_response(message: str, user_id: str, session_id: str | None = None):
-        return await sandbox_manager.send_message(user_id, message)
-    async def clear_session(user_id: str):
-        return await sandbox_manager.clear_session(user_id)
+    from modal_sessions import get_response, clear_session
 else:
     from sessions import get_response, clear_session
 
