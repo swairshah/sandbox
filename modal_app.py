@@ -23,11 +23,12 @@ def _ignore(path: Path) -> bool:
 
 app = modal.App(APP_NAME)
 
+# Check for requirements.txt - only matters during image build
 requirements_path = ROOT_DIR / "requirements.txt"
 if requirements_path.exists():
     base_image = modal.Image.debian_slim().pip_install_from_requirements(str(requirements_path))
 else:
-    print(f"[modal_app] WARNING: missing {requirements_path}, using fallback deps")
+    # Fallback deps - this is fine, image is already built when running in Modal
     base_image = modal.Image.debian_slim().pip_install(
         "fastapi==0.109.0",
         "uvicorn[standard]==0.27.0",

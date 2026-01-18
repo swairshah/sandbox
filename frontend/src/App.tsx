@@ -84,6 +84,47 @@ export default function App() {
 
   // Get current user identifier (email for auth, guestId for guests)
   const userId = auth.isAuthenticated ? auth.user?.email || "user" : guestId;
+  const userIdRef = useRef(userId); // Track latest userId for WebSocket callbacks
+
+  // Keep userIdRef in sync
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
+
+  // Load chat history from server
+  const loadChatHistory = useCallback(async (uid: string) => {
+    try {
+      const response = await fetch(`/chat/history?user_id=${encodeURIComponent(uid)}`);
+      if (!response.ok) return;
+      
+      const data = await response.json();
+      if (data.messages && data.messages.length > 0) {
+        const loadedMessages: Message[] = [];
+        for (const msg of data.messages) {
+          loadedMessages.push({
+            id: msg.id || generateId(),
+            type: msg.role === "user" ? "user" : "assistant",
+            content: msg.content,
+            status: "completed" as MessageStatus,
+          });
+          // Add tool events if any
+          if (msg.tool_events) {
+            for (const event of msg.tool_events) {
+              loadedMessages.push({
+                id: generateId(),
+                type: "tool",
+                content: "",
+                tool: event,
+              });
+            }
+          }
+        }
+        setMessages(loadedMessages);
+      }
+    } catch (e) {
+      console.error("Failed to load chat history:", e);
+    }
+  }, []);
 
   // Update message status helper
   const updateMessageStatus = useCallback(
@@ -172,12 +213,53 @@ export default function App() {
             }
             break;
 
+          case "tool_use":
+            // Stream tool use as it happens
+            if (data.message_id) {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: generateId(),
+                  type: "tool",
+                  content: "",
+                  tool: {
+                    type: "tool_use",
+                    name: data.name,
+                    input: data.input,
+                    tool_use_id: data.tool_use_id,
+                  },
+                },
+              ]);
+            }
+            break;
+
+          case "tool_result":
+            // Stream tool result as it happens
+            if (data.message_id) {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: generateId(),
+                  type: "tool",
+                  content: "",
+                  tool: {
+                    type: "tool_result",
+                    tool_use_id: data.tool_use_id,
+                    content: data.content,
+                    is_error: data.is_error,
+                  },
+                },
+              ]);
+            }
+            break;
+
           case "response":
             if (data.message_id) {
+              // Don't add tool_events here since they were already streamed
               addAssistantResponse(
                 data.message_id,
                 data.content || "",
-                data.tool_events
+                undefined // Tool events already added via streaming
               );
               setQueueStatus((prev) => ({ ...prev, processing: false }));
             }
@@ -232,8 +314,8 @@ export default function App() {
 
     ws.onopen = () => {
       console.log("WebSocket connected");
-      // Send connect message with user_id
-      ws.send(JSON.stringify({ type: "connect", user_id: userId }));
+      // Send connect message with user_id - use ref for latest value
+      ws.send(JSON.stringify({ type: "connect", user_id: userIdRef.current }));
     };
 
     ws.onmessage = handleWebSocketMessage;
@@ -253,7 +335,7 @@ export default function App() {
     };
 
     wsRef.current = ws;
-  }, [userId, handleWebSocketMessage]);
+  }, [handleWebSocketMessage]); // No userId dep - uses userIdRef for latest value
 
   // Initialize WebSocket connection
   useEffect(() => {
@@ -269,16 +351,27 @@ export default function App() {
     };
   }, [connectWebSocket]);
 
-  // Reconnect WebSocket and clear messages when userId changes
+  // Reconnect WebSocket and load messages when userId changes
   useEffect(() => {
+    // Clear any pending reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
       setWsConnected(false);
-      setMessages([]); // Clear chat history for new user
+      setMessages([]); // Clear current messages first
+      loadChatHistory(userId); // Load history for new user
       connectWebSocket();
     }
-  }, [userId, connectWebSocket]);
+  }, [userId, connectWebSocket, loadChatHistory]);
+
+  // Load chat history on initial mount
+  useEffect(() => {
+    loadChatHistory(userId);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");

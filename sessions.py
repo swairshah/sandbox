@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Awaitable, Any
 from enum import Enum
 
+import database
+
 from claude_agent_sdk import (
     ClaudeSDKClient,
     ClaudeAgentOptions,
@@ -254,6 +256,9 @@ async def process_queue(user_id: str) -> None:
                     "queue_remaining": user_queue.queue.qsize()
                 })
 
+            # Save user message to database
+            database.save_message(queued_msg.user_id, "user", queued_msg.content)
+
             try:
                 # Check if cancellation was requested before we even start
                 if user_queue.cancel_requested:
@@ -281,6 +286,11 @@ async def process_queue(user_id: str) -> None:
                             "reason": "Cancelled during processing"
                         })
                     continue
+
+                # Save assistant response to database
+                database.save_message(
+                    queued_msg.user_id, "assistant", response_text, tool_events, new_session_id
+                )
 
                 # Send response back to client
                 if user_queue.response_callback:

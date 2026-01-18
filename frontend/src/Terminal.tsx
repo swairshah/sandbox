@@ -15,7 +15,13 @@ export default function Terminal({ className, userId }: TerminalProps) {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
+  const userIdRef = useRef(userId); // Track latest userId
   const [connected, setConnected] = useState(false);
+
+  // Keep userIdRef in sync
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -25,8 +31,8 @@ export default function Terminal({ className, userId }: TerminalProps) {
     const ws = new WebSocket(`${protocol}//${host}/ws/terminal`);
 
     ws.onopen = () => {
-      // Send connect message with user_id first
-      const effectiveUserId = userId || `guest_${Math.random().toString(36).slice(2, 10)}`;
+      // Send connect message with user_id first - use ref for latest value
+      const effectiveUserId = userIdRef.current || `guest_${Math.random().toString(36).slice(2, 10)}`;
       ws.send(JSON.stringify({ type: 'connect', user_id: effectiveUserId }));
     };
 
@@ -69,7 +75,7 @@ export default function Terminal({ className, userId }: TerminalProps) {
     };
 
     wsRef.current = ws;
-  }, [userId]);
+  }, []); // No deps - uses userIdRef for latest userId
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -159,6 +165,11 @@ export default function Terminal({ className, userId }: TerminalProps) {
 
   // Reconnect when userId changes
   useEffect(() => {
+    // Clear any pending reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;

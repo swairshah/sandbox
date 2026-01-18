@@ -142,6 +142,12 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
+  const userIdRef = useRef(userId); // Track latest userId
+
+  // Keep userIdRef in sync
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -151,8 +157,8 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
     const ws = new WebSocket(`${protocol}//${host}/ws/files`);
 
     ws.onopen = () => {
-      // Send connect message with user_id first
-      const effectiveUserId = userId || `guest_${Math.random().toString(36).slice(2, 10)}`;
+      // Send connect message with user_id first - use ref for latest value
+      const effectiveUserId = userIdRef.current || `guest_${Math.random().toString(36).slice(2, 10)}`;
       ws.send(JSON.stringify({ type: 'connect', user_id: effectiveUserId }));
     };
 
@@ -191,7 +197,7 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
     };
 
     wsRef.current = ws;
-  }, [userId]);
+  }, []); // No deps - uses userIdRef for latest userId
 
   const handleFileEvent = (event: FileEvent) => {
     // Request fresh tree on any file event
@@ -216,10 +222,16 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
 
   // Reconnect when userId changes
   useEffect(() => {
+    // Clear any pending reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
       setConnected(false);
+      setTree(null); // Clear tree for new user
       connect();
     }
   }, [userId, connect]);

@@ -14,6 +14,7 @@ from routes import auth_router, chat_router
 from routes.files import router as files_router
 from file_manager import get_file_watcher, list_directory, FileEvent
 from terminal import terminal_session
+import database
 
 # Use modal_sessions on Modal, sessions locally
 IS_MODAL = os.environ.get("MODAL_ENVIRONMENT") is not None
@@ -21,6 +22,7 @@ IS_MODAL = os.environ.get("MODAL_ENVIRONMENT") is not None
 if IS_MODAL:
     from modal_sessions import (
         get_response,
+        get_response_streaming,
         clear_session,
         get_session_manager,
         cleanup_session_manager,
@@ -186,7 +188,22 @@ async def web_chat(request: WebChatRequest):
 async def clear_chat(request: WebChatRequest):
     """Clear chat history for a user."""
     await clear_session(request.user_id)
+    database.clear_messages(request.user_id)
     return {"status": "cleared", "user_id": request.user_id}
+
+
+@app.get("/chat/history")
+async def get_chat_history(user_id: str = "guest", limit: int = 50, offset: int = 0):
+    """Get chat history for a user."""
+    messages = database.get_messages(user_id, limit, offset)
+    total = database.get_message_count(user_id)
+    return {
+        "messages": messages,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "user_id": user_id,
+    }
 
 
 @app.get("/health")
@@ -248,10 +265,34 @@ async def websocket_chat(websocket: WebSocket):
                     message_id = msg.get("message_id", f"msg_{uuid.uuid4().hex[:8]}")
                     await websocket.send_json({"type": "processing_started", "message_id": message_id})
 
+                    # Save user message to database
+                    database.save_message(user_id, "user", content)
+
+                    # Streaming callbacks to send tool events as they happen
+                    async def on_tool_use(event):
+                        await websocket.send_json({
+                            "type": "tool_use",
+                            "message_id": message_id,
+                            **event,
+                        })
+
+                    async def on_tool_result(event):
+                        await websocket.send_json({
+                            "type": "tool_result", 
+                            "message_id": message_id,
+                            **event,
+                        })
+
                     try:
-                        response_text, session_id, tool_events = await get_response(
-                            content, user_id
+                        response_text, session_id, tool_events = await get_response_streaming(
+                            content, user_id,
+                            on_tool_use=on_tool_use,
+                            on_tool_result=on_tool_result,
                         )
+                        
+                        # Save assistant response to database
+                        database.save_message(user_id, "assistant", response_text, tool_events, session_id)
+                        
                         await websocket.send_json({
                             "type": "response",
                             "message_id": message_id,

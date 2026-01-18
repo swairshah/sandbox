@@ -531,6 +531,22 @@ async def get_response(
     return await manager.chat(user_id, message, session_id=session_id)
 
 
+async def get_response_streaming(
+    message: str,
+    user_id: str,
+    session_id: str | None = None,
+    on_text: Optional[callable] = None,
+    on_tool_use: Optional[callable] = None,
+    on_tool_result: Optional[callable] = None,
+) -> tuple[str, str | None, list[dict[str, object]]]:
+    """Get response with streaming callbacks for tool events."""
+    manager = await get_session_manager()
+    return await manager.chat(
+        user_id, message, session_id=session_id,
+        on_text=on_text, on_tool_use=on_tool_use, on_tool_result=on_tool_result
+    )
+
+
 async def clear_session(user_id: str) -> bool:
     manager = await get_session_manager()
     return await manager.clear_session(user_id)
