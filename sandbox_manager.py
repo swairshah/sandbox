@@ -7,6 +7,9 @@ Each user gets their own isolated sandbox with:
 """
 
 import modal
+import hashlib
+import re
+from pathlib import Path
 import httpx
 import asyncio
 from typing import Optional
@@ -27,11 +30,90 @@ _code_volume: Optional[modal.Volume] = None
 _active_sandboxes: dict[str, tuple[modal.Sandbox, str]] = {}
 
 
+def _run_exec(sb: modal.Sandbox, *args: str) -> tuple[str, str, int]:
+    process = sb.exec(*args)
+    stdout = process.stdout.read() if process.stdout else ""
+    stderr = process.stderr.read() if process.stderr else ""
+    rc = process.wait()
+    return stdout, stderr, rc
+
+
+def _ensure_dependency(sb: modal.Sandbox, package: str, module: str) -> None:
+    _, _, rc = _run_exec(sb, "python", "-c", f"import {module}")
+    if rc == 0:
+        return
+    print(f"[sandbox_manager] Installing {package} (missing: {module})")
+    stdout, stderr, install_rc = _run_exec(
+        sb, "python", "-m", "pip", "install", "--no-cache-dir", package
+    )
+    if install_rc != 0:
+        raise RuntimeError(f"Failed to install {package}: {stdout}{stderr}")
+
+
+def _find_sandbox_server(sb: modal.Sandbox) -> str | None:
+    candidates = [
+        "/sandbox_server.py",
+        "/code/sandbox_server.py",
+        "/app/sandbox_server.py",
+        "/root/app/sandbox_server.py",
+        "/root/sandbox_server.py",
+    ]
+    for path in candidates:
+        _, _, rc = _run_exec(sb, "bash", "-c", f'test -f "{path}"')
+        if rc == 0:
+            return path
+    return None
+
+
+def _local_sandbox_server_path() -> Path | None:
+    candidates = [
+        Path(__file__).resolve().parent / "sandbox_server.py",
+        Path("/code/sandbox_server.py"),
+        Path("/root/sandbox_server.py"),
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _upload_sandbox_server(sb: modal.Sandbox) -> str:
+    local_path = _local_sandbox_server_path()
+    if not local_path:
+        raise RuntimeError("sandbox_server.py not found in API container")
+    content = local_path.read_text()
+    process = sb.exec("bash", "-c", "cat > /sandbox_server.py")
+    process.stdin.write(content)
+    process.stdin.write_eof()
+    process.stdin.drain()
+    rc = process.wait()
+    if rc != 0:
+        stderr = process.stderr.read() if process.stderr else ""
+        raise RuntimeError(f"Failed to upload sandbox_server.py: {stderr}")
+    return "/sandbox_server.py"
+
+
+def _sanitize_volume_name(user_id: str) -> str:
+    base = "monios-user"
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", user_id).strip("-")
+    if not slug:
+        slug = "user"
+    suffix = hashlib.sha1(user_id.encode()).hexdigest()[:8]
+    # Keep under 64 chars
+    max_slug_len = 64 - len(base) - len(suffix) - 2
+    if max_slug_len < 1:
+        slug = "user"
+        max_slug_len = 64 - len(base) - len(suffix) - 2
+    if len(slug) > max_slug_len:
+        slug = slug[:max_slug_len].rstrip("-")
+    return f"{base}-{slug}-{suffix}"
+
+
 def init(
-    app: modal.App,
-    sandbox_image: modal.Image,
+    app: Optional[modal.App],
+    sandbox_image: Optional[modal.Image],
     secrets: list = None,
-    code_volume: modal.Volume = None,
+    code_volume: Optional[modal.Volume] = None,
 ):
     """Initialize the sandbox manager with app and image references."""
     global _app, _sandbox_image, _secrets, _code_volume
@@ -46,6 +128,9 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str]:
     global _active_sandboxes
 
     print(f"[sandbox_manager] get_or_create_sandbox for user: {user_id}")
+
+    if _sandbox_image is None:
+        raise RuntimeError("sandbox_manager.init must set sandbox_image before creating sandboxes")
 
     # Check if we have an active sandbox
     if user_id in _active_sandboxes:
@@ -62,13 +147,14 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str]:
     # Create user's volume (persistent across sandbox restarts)
     print(f"[sandbox_manager] Creating volume for user: {user_id}")
     user_volume = modal.Volume.from_name(
-        f"monios-user-{user_id}",
+        _sanitize_volume_name(user_id),
         create_if_missing=True
     )
 
     # Create new sandbox with secrets for Claude API
     print(f"[sandbox_manager] Creating sandbox for user: {user_id}")
     volumes = {"/workspace": user_volume}
+    workdir = "/workspace"
     if _code_volume:
         volumes["/code"] = _code_volume
 
@@ -96,9 +182,19 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str]:
     # First check if the file exists
     check_process = run_cmd("ls", "-la", "/code/")
     print(f"[sandbox_manager] /code/ contents: {check_process.stdout.read()}")
+    check_process = run_cmd("ls", "-la", "/app/")
+    print(f"[sandbox_manager] /app/ contents: {check_process.stdout.read()}")
 
-    # Start the server from the shared code volume
-    process = run_cmd("python", "/code/sandbox_server.py")
+    _ensure_dependency(sb, "claude-agent-sdk", "claude_agent_sdk")
+
+    # Ensure workspace exists
+    _run_exec(sb, "bash", "-c", "mkdir -p /workspace")
+
+    # Start the server from the shared code volume or upload on demand
+    server_path = _find_sandbox_server(sb)
+    if not server_path:
+        server_path = _upload_sandbox_server(sb)
+    process = run_cmd("python", server_path)
     print(f"[sandbox_manager] Process started: {process}")
 
     # Give it a moment to start and check for immediate errors
