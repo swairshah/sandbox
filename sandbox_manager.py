@@ -93,20 +93,28 @@ def _upload_sandbox_server(sb: modal.Sandbox) -> str:
     return "/sandbox_server.py"
 
 
-def _sanitize_volume_name(user_id: str) -> str:
-    base = "monios-user"
+def _sanitize_name(user_id: str, prefix: str = "monios-user") -> str:
+    """Sanitize user_id for use in Modal resource names (volumes, sandboxes)."""
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", user_id).strip("-")
     if not slug:
         slug = "user"
     suffix = hashlib.sha1(user_id.encode()).hexdigest()[:8]
     # Keep under 64 chars
-    max_slug_len = 64 - len(base) - len(suffix) - 2
+    max_slug_len = 64 - len(prefix) - len(suffix) - 2
     if max_slug_len < 1:
         slug = "user"
-        max_slug_len = 64 - len(base) - len(suffix) - 2
+        max_slug_len = 64 - len(prefix) - len(suffix) - 2
     if len(slug) > max_slug_len:
         slug = slug[:max_slug_len].rstrip("-")
-    return f"{base}-{slug}-{suffix}"
+    return f"{prefix}-{slug}-{suffix}"
+
+
+def _sanitize_volume_name(user_id: str) -> str:
+    return _sanitize_name(user_id, "monios-user")
+
+
+def _sanitize_sandbox_name(user_id: str) -> str:
+    return _sanitize_name(user_id, "monios-sb")
 
 
 def init(
@@ -132,17 +140,43 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str, str |
     if _sandbox_image is None:
         raise RuntimeError("sandbox_manager.init must set sandbox_image before creating sandboxes")
 
-    # Check if we have an active sandbox
+    sandbox_name = _sanitize_sandbox_name(user_id)
+    app_name = _app.name if _app else "monios-api"
+
+    # First, check local cache
     if user_id in _active_sandboxes:
         sb, http_url, terminal_url = _active_sandboxes[user_id]
         # Check if still running
         if sb.poll() is None:
-            print(f"[sandbox_manager] Reusing existing sandbox for {user_id}")
+            print(f"[sandbox_manager] Reusing cached sandbox for {user_id}")
             return sb, http_url, terminal_url
         else:
             # Sandbox terminated, remove from cache
-            print(f"[sandbox_manager] Sandbox terminated, creating new one for {user_id}")
+            print(f"[sandbox_manager] Cached sandbox terminated for {user_id}")
             del _active_sandboxes[user_id]
+
+    # Try to find existing named sandbox from Modal
+    try:
+        sb = modal.Sandbox.from_name(app_name, sandbox_name)
+        if sb.poll() is None:
+            print(f"[sandbox_manager] Found existing named sandbox for {user_id}: {sb.object_id}")
+            # Get tunnel URLs
+            tunnels = sb.tunnels()
+            http_tunnel = tunnels.get(8080)
+            terminal_tunnel = tunnels.get(8081)
+            if http_tunnel:
+                http_url = http_tunnel.url
+                terminal_url = terminal_tunnel.url if terminal_tunnel else None
+                # Cache it
+                _active_sandboxes[user_id] = (sb, http_url, terminal_url)
+                print(f"[sandbox_manager] Reusing named sandbox: http={http_url}, terminal={terminal_url}")
+                return sb, http_url, terminal_url
+            else:
+                print(f"[sandbox_manager] Named sandbox found but no tunnel, creating new one")
+    except modal.exception.NotFoundError:
+        print(f"[sandbox_manager] No existing named sandbox for {user_id}, creating new one")
+    except Exception as e:
+        print(f"[sandbox_manager] Error looking up named sandbox: {e}, creating new one")
 
     # Create user's volume (persistent across sandbox restarts)
     print(f"[sandbox_manager] Creating volume for user: {user_id}")
@@ -152,7 +186,7 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str, str |
     )
 
     # Create new sandbox with secrets for Claude API
-    print(f"[sandbox_manager] Creating sandbox for user: {user_id}")
+    print(f"[sandbox_manager] Creating named sandbox '{sandbox_name}' for user: {user_id}")
     volumes = {"/workspace": user_volume}
     workdir = "/workspace"
     if _code_volume:
@@ -160,6 +194,7 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str, str |
 
     sb = modal.Sandbox.create(
         app=_app,
+        name=sandbox_name,  # Named sandbox for cross-instance lookup
         image=_sandbox_image,
         secrets=_secrets,
         env={
@@ -267,7 +302,7 @@ async def _wait_for_ready(tunnel_url: str, timeout: float = 60.0):
 
 async def send_message(user_id: str, message: str) -> tuple[str, str, list[dict[str, object]]]:
     """Send a message to the user's sandbox and get response."""
-    sb, tunnel_url = await get_or_create_sandbox(user_id)
+    sb, tunnel_url, _ = await get_or_create_sandbox(user_id)
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -298,7 +333,7 @@ async def clear_session(user_id: str) -> bool:
     if user_id not in _active_sandboxes:
         return False
 
-    sb, tunnel_url = _active_sandboxes[user_id]
+    sb, tunnel_url, _ = _active_sandboxes[user_id]
 
     try:
         async with httpx.AsyncClient() as client:
@@ -314,7 +349,7 @@ async def terminate_sandbox(user_id: str) -> bool:
     if user_id not in _active_sandboxes:
         return False
 
-    sb, _ = _active_sandboxes[user_id]
+    sb, _, _ = _active_sandboxes[user_id]
 
     try:
         sb.terminate()
