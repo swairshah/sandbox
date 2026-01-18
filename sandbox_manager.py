@@ -123,8 +123,8 @@ def init(
     _code_volume = code_volume
 
 
-async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str]:
-    """Get existing sandbox or create new one for user. Returns (sandbox, tunnel_url)."""
+async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str, str | None]:
+    """Get existing sandbox or create new one for user. Returns (sandbox, http_url, terminal_url)."""
     global _active_sandboxes
 
     print(f"[sandbox_manager] get_or_create_sandbox for user: {user_id}")
@@ -134,11 +134,11 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str]:
 
     # Check if we have an active sandbox
     if user_id in _active_sandboxes:
-        sb, tunnel_url = _active_sandboxes[user_id]
+        sb, http_url, terminal_url = _active_sandboxes[user_id]
         # Check if still running
         if sb.poll() is None:
             print(f"[sandbox_manager] Reusing existing sandbox for {user_id}")
-            return sb, tunnel_url
+            return sb, http_url, terminal_url
         else:
             # Sandbox terminated, remove from cache
             print(f"[sandbox_manager] Sandbox terminated, creating new one for {user_id}")
@@ -171,7 +171,7 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str]:
         volumes=volumes,
         cpu=1.0,
         memory=512,
-        encrypted_ports=[8080],  # Expose sandbox server port
+        encrypted_ports=[8080, 8081],  # 8080=HTTP/files, 8081=terminal WebSocket
     )
     print(f"[sandbox_manager] Sandbox created: {sb.object_id}")
 
@@ -186,6 +186,7 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str]:
     print(f"[sandbox_manager] /app/ contents: {check_process.stdout.read()}")
 
     _ensure_dependency(sb, "claude-agent-sdk", "claude_agent_sdk")
+    _ensure_dependency(sb, "websockets", "websockets")
 
     # Ensure workspace exists
     _run_exec(sb, "bash", "-c", "mkdir -p /workspace")
@@ -213,23 +214,28 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str]:
     except Exception as e:
         print(f"[sandbox_manager] Could not read process output: {e}")
 
-    # Get tunnel URL for HTTP access
-    print(f"[sandbox_manager] Getting tunnel...")
+    # Get tunnel URLs for HTTP and terminal access
+    print(f"[sandbox_manager] Getting tunnels...")
     tunnels = sb.tunnels()
     print(f"[sandbox_manager] Available tunnels: {tunnels}")
-    tunnel = tunnels.get(8080)
-    if not tunnel:
+    
+    http_tunnel = tunnels.get(8080)
+    if not http_tunnel:
         raise Exception(f"No tunnel on port 8080. Available: {list(tunnels.keys())}")
-    tunnel_url = tunnel.url
-    print(f"[sandbox_manager] Tunnel URL: {tunnel_url}")
+    http_url = http_tunnel.url
+    print(f"[sandbox_manager] HTTP Tunnel URL: {http_url}")
+    
+    terminal_tunnel = tunnels.get(8081)
+    terminal_url = terminal_tunnel.url if terminal_tunnel else None
+    print(f"[sandbox_manager] Terminal Tunnel URL: {terminal_url}")
 
     # Wait for server to be ready
-    await _wait_for_ready(tunnel_url)
+    await _wait_for_ready(http_url)
 
-    # Cache the sandbox
-    _active_sandboxes[user_id] = (sb, tunnel_url)
+    # Cache the sandbox with both URLs
+    _active_sandboxes[user_id] = (sb, http_url, terminal_url)
 
-    return sb, tunnel_url
+    return sb, http_url, terminal_url
 
 
 async def _wait_for_ready(tunnel_url: str, timeout: float = 60.0):

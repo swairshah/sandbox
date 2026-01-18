@@ -165,7 +165,7 @@ class ModalToolProvider:
 
         async def _run_cmd(cmd: str) -> tuple[str, int]:
             try:
-                sandbox, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+                sandbox, _, _ = await sandbox_manager.get_or_create_sandbox(user_id)
                 process = sandbox.exec("bash", "-c", cmd)
                 stdout = process.stdout.read() if process.stdout else ""
                 stderr = process.stderr.read() if process.stderr else ""
@@ -176,7 +176,7 @@ class ModalToolProvider:
 
         async def _run_cmd_stdin(cmd: str, stdin_data: str) -> tuple[str, int]:
             try:
-                sandbox, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+                sandbox, _, _ = await sandbox_manager.get_or_create_sandbox(user_id)
                 process = sandbox.exec("bash", "-c", cmd)
                 process.stdin.write(stdin_data)
                 process.stdin.write_eof()
