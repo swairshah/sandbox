@@ -10,6 +10,7 @@ import struct
 import fcntl
 import termios
 import asyncio
+import time
 import signal
 from typing import Optional
 from pathlib import Path
@@ -113,7 +114,7 @@ class PtyProcess:
                     pid, _ = os.waitpid(self.pid, os.WNOHANG)
                     if pid != 0:
                         break
-                    asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.1))
+                    time.sleep(0.1)
                 else:
                     # Force kill if still running
                     os.kill(self.pid, signal.SIGKILL)
