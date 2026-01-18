@@ -25,6 +25,8 @@ if IS_MODAL:
         get_session_manager,
         cleanup_session_manager,
     )
+    import sandbox_manager
+    import httpx
     # Queue functions not available in Modal mode
     enqueue_message = None
     set_response_callback = None
@@ -50,33 +52,37 @@ async def lifespan(app: FastAPI):
     # Startup
     if IS_MODAL:
         await get_session_manager()
-    loop = asyncio.get_event_loop()
-    file_watcher = get_file_watcher()
-    file_watcher.start(loop)
-
-    # Subscribe to file events and broadcast to all connected WebSockets
-    def broadcast_file_event(event: FileEvent):
-        """Broadcast file event to all connected WebSocket clients."""
-        if _file_ws_connections:
-            event_data = {
-                "type": "file_event",
-                **event.to_dict()
-            }
-            # Schedule broadcast for each connection
-            for ws in list(_file_ws_connections):
-                try:
-                    asyncio.create_task(ws.send_json(event_data))
-                except Exception:
-                    pass
-
-    file_watcher.subscribe(broadcast_file_event)
-
-    yield
-
-    # Shutdown
-    file_watcher.stop()
-    if IS_MODAL:
+        # File watching in Modal mode is done via sandbox polling (no local watcher)
+        yield
+        # Shutdown
         await cleanup_session_manager()
+    else:
+        # Local mode: use file watcher
+        loop = asyncio.get_event_loop()
+        file_watcher = get_file_watcher()
+        file_watcher.start(loop)
+
+        # Subscribe to file events and broadcast to all connected WebSockets
+        def broadcast_file_event(event: FileEvent):
+            """Broadcast file event to all connected WebSocket clients."""
+            if _file_ws_connections:
+                event_data = {
+                    "type": "file_event",
+                    **event.to_dict()
+                }
+                # Schedule broadcast for each connection
+                for ws in list(_file_ws_connections):
+                    try:
+                        asyncio.create_task(ws.send_json(event_data))
+                    except Exception:
+                        pass
+
+        file_watcher.subscribe(broadcast_file_event)
+
+        yield
+
+        # Shutdown
+        file_watcher.stop()
 
 
 app = FastAPI(
@@ -342,6 +348,18 @@ async def websocket_chat(websocket: WebSocket):
             set_response_callback(user_id, None)
 
 
+# Helper to get file tree from sandbox
+async def _get_sandbox_file_tree(user_id: str, path: str = "") -> dict:
+    """Fetch file tree from user's sandbox."""
+    _, http_url, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{http_url}/files/list", params={"path": path}, timeout=10.0)
+        if resp.status_code != 200:
+            raise Exception(f"Sandbox error: {resp.text}")
+        data = resp.json()
+        return data.get("data", {})
+
+
 # WebSocket endpoint for real-time file system updates
 @app.websocket("/ws/files")
 async def websocket_files(websocket: WebSocket):
@@ -349,6 +367,7 @@ async def websocket_files(websocket: WebSocket):
     WebSocket endpoint for real-time file system updates.
 
     Client sends JSON messages:
+    - {"type": "connect", "user_id": "..."} - Connect with user ID (Modal mode)
     - {"type": "subscribe"} - Start receiving file events
     - {"type": "get_tree", "path": "..."} - Get directory tree
 
@@ -359,61 +378,111 @@ async def websocket_files(websocket: WebSocket):
     """
     await websocket.accept()
     _file_ws_connections.add(websocket)
+    user_id: str | None = None
 
     try:
-        # Send initial directory tree
-        try:
-            tree = list_directory("")
-            await websocket.send_json({
-                "type": "tree",
-                "data": tree.to_dict()
-            })
-        except Exception as e:
-            await websocket.send_json({
-                "type": "error",
-                "error": f"Failed to load directory tree: {str(e)}"
-            })
-
-        while True:
-            data = await websocket.receive_text()
-            try:
-                msg = json.loads(data)
-            except json.JSONDecodeError:
-                await websocket.send_json({
-                    "type": "error",
-                    "error": "Invalid JSON"
-                })
-                continue
-
-            msg_type = msg.get("type")
-
-            if msg_type == "get_tree":
-                path = msg.get("path", "")
+        if IS_MODAL:
+            # Modal mode: wait for connect message with user_id first
+            # Then fetch tree from sandbox
+            while True:
+                data = await websocket.receive_text()
                 try:
-                    tree = list_directory(path)
-                    await websocket.send_json({
-                        "type": "tree",
-                        "data": tree.to_dict()
-                    })
-                except FileNotFoundError as e:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": str(e)
-                    })
-                except NotADirectoryError as e:
-                    await websocket.send_json({
-                        "type": "error",
-                        "error": str(e)
-                    })
+                    msg = json.loads(data)
+                except json.JSONDecodeError:
+                    await websocket.send_json({"type": "error", "error": "Invalid JSON"})
+                    continue
 
-            elif msg_type == "subscribe":
-                await websocket.send_json({"type": "subscribed"})
+                msg_type = msg.get("type")
 
-            else:
+                if msg_type == "connect":
+                    user_id = msg.get("user_id", f"guest_{uuid.uuid4().hex[:8]}")
+                    # Send initial tree from sandbox
+                    try:
+                        tree = await _get_sandbox_file_tree(user_id, "")
+                        await websocket.send_json({"type": "connected", "user_id": user_id})
+                        await websocket.send_json({"type": "tree", "data": tree})
+                    except Exception as e:
+                        await websocket.send_json({"type": "error", "error": f"Failed to load directory tree: {str(e)}"})
+
+                elif msg_type == "get_tree":
+                    if not user_id:
+                        await websocket.send_json({"type": "error", "error": "Not connected"})
+                        continue
+                    path = msg.get("path", "")
+                    try:
+                        tree = await _get_sandbox_file_tree(user_id, path)
+                        await websocket.send_json({"type": "tree", "data": tree})
+                    except Exception as e:
+                        await websocket.send_json({"type": "error", "error": str(e)})
+
+                elif msg_type == "subscribe":
+                    await websocket.send_json({"type": "subscribed"})
+
+                elif msg_type == "refresh":
+                    # Manual refresh request
+                    if user_id:
+                        try:
+                            tree = await _get_sandbox_file_tree(user_id, "")
+                            await websocket.send_json({"type": "tree", "data": tree})
+                        except Exception as e:
+                            await websocket.send_json({"type": "error", "error": str(e)})
+
+                else:
+                    await websocket.send_json({"type": "error", "error": f"Unknown message type: {msg_type}"})
+        else:
+            # Local mode: use local file_manager
+            try:
+                tree = list_directory("")
+                await websocket.send_json({
+                    "type": "tree",
+                    "data": tree.to_dict()
+                })
+            except Exception as e:
                 await websocket.send_json({
                     "type": "error",
-                    "error": f"Unknown message type: {msg_type}"
+                    "error": f"Failed to load directory tree: {str(e)}"
                 })
+
+            while True:
+                data = await websocket.receive_text()
+                try:
+                    msg = json.loads(data)
+                except json.JSONDecodeError:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": "Invalid JSON"
+                    })
+                    continue
+
+                msg_type = msg.get("type")
+
+                if msg_type == "get_tree":
+                    path = msg.get("path", "")
+                    try:
+                        tree = list_directory(path)
+                        await websocket.send_json({
+                            "type": "tree",
+                            "data": tree.to_dict()
+                        })
+                    except FileNotFoundError as e:
+                        await websocket.send_json({
+                            "type": "error",
+                            "error": str(e)
+                        })
+                    except NotADirectoryError as e:
+                        await websocket.send_json({
+                            "type": "error",
+                            "error": str(e)
+                        })
+
+                elif msg_type == "subscribe":
+                    await websocket.send_json({"type": "subscribed"})
+
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "error": f"Unknown message type: {msg_type}"
+                    })
 
     except WebSocketDisconnect:
         print("File watcher WebSocket disconnected")
@@ -432,22 +501,84 @@ async def websocket_terminal(websocket: WebSocket):
     Protocol:
     - Client sends raw text input (keystrokes)
     - Client sends JSON for control: {"type": "resize", "cols": N, "rows": N}
+    - Client sends JSON for connect (Modal mode): {"type": "connect", "user_id": "..."}
     - Server sends raw text output (terminal output)
     """
     await websocket.accept()
 
-    async def send_json(data: dict):
-        await websocket.send_json(data)
+    if IS_MODAL:
+        # Modal mode: proxy to sandbox's terminal WebSocket
+        import websockets
+        
+        user_id: str | None = None
+        sandbox_ws = None
+        
+        try:
+            while True:
+                data = await websocket.receive_text()
+                
+                # Check for connect message first
+                if data.startswith("{"):
+                    try:
+                        msg = json.loads(data)
+                        if msg.get("type") == "connect":
+                            user_id = msg.get("user_id", f"guest_{uuid.uuid4().hex[:8]}")
+                            # Get sandbox terminal URL
+                            _, _, terminal_url = await sandbox_manager.get_or_create_sandbox(user_id)
+                            if not terminal_url:
+                                await websocket.send_json({"type": "error", "error": "Terminal not available"})
+                                continue
+                            
+                            # Convert HTTPS URL to WSS
+                            ws_url = terminal_url.replace("https://", "wss://").replace("http://", "ws://")
+                            
+                            # Connect to sandbox terminal
+                            sandbox_ws = await websockets.connect(ws_url)
+                            await websocket.send_json({"type": "connected", "user_id": user_id})
+                            
+                            # Start bidirectional relay
+                            async def relay_from_sandbox():
+                                try:
+                                    async for message in sandbox_ws:
+                                        await websocket.send_text(message)
+                                except Exception:
+                                    pass
+                            
+                            relay_task = asyncio.create_task(relay_from_sandbox())
+                            continue
+                        elif msg.get("type") == "resize" and sandbox_ws:
+                            await sandbox_ws.send(data)
+                            continue
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Forward to sandbox
+                if sandbox_ws:
+                    await sandbox_ws.send(data)
+                else:
+                    await websocket.send_json({"type": "error", "error": "Not connected. Send connect message first."})
+                    
+        except WebSocketDisconnect:
+            print("Terminal WebSocket disconnected")
+        except Exception as e:
+            print(f"Terminal WebSocket error: {e}")
+        finally:
+            if sandbox_ws:
+                await sandbox_ws.close()
+    else:
+        # Local mode: use local PTY
+        async def send_json(data: dict):
+            await websocket.send_json(data)
 
-    async def receive_text() -> str:
-        return await websocket.receive_text()
+        async def receive_text() -> str:
+            return await websocket.receive_text()
 
-    try:
-        await terminal_session(websocket, send_json, receive_text)
-    except WebSocketDisconnect:
-        print("Terminal WebSocket disconnected")
-    except Exception as e:
-        print(f"Terminal WebSocket error: {e}")
+        try:
+            await terminal_session(websocket, send_json, receive_text)
+        except WebSocketDisconnect:
+            print("Terminal WebSocket disconnected")
+        except Exception as e:
+            print(f"Terminal WebSocket error: {e}")
 
 
 # Serve static frontend files
