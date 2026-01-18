@@ -166,7 +166,9 @@ class ModalToolProvider:
         async def _run_cmd(cmd: str) -> tuple[str, int]:
             try:
                 sandbox, _, _ = await sandbox_manager.get_or_create_sandbox(user_id)
-                process = sandbox.exec("bash", "-c", cmd)
+                # Always run commands in /workspace directory
+                full_cmd = f"cd {workdir} && {cmd}"
+                process = sandbox.exec("bash", "-c", full_cmd)
                 stdout = process.stdout.read() if process.stdout else ""
                 stderr = process.stderr.read() if process.stderr else ""
                 rc = process.wait()
@@ -177,7 +179,9 @@ class ModalToolProvider:
         async def _run_cmd_stdin(cmd: str, stdin_data: str) -> tuple[str, int]:
             try:
                 sandbox, _, _ = await sandbox_manager.get_or_create_sandbox(user_id)
-                process = sandbox.exec("bash", "-c", cmd)
+                # Always run commands in /workspace directory
+                full_cmd = f"cd {workdir} && {cmd}"
+                process = sandbox.exec("bash", "-c", full_cmd)
                 process.stdin.write(stdin_data)
                 process.stdin.write_eof()
                 process.stdin.drain()
