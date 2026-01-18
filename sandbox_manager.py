@@ -155,28 +155,33 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str, str |
             print(f"[sandbox_manager] Cached sandbox terminated for {user_id}")
             del _active_sandboxes[user_id]
 
-    # Try to find existing named sandbox from Modal
-    try:
-        sb = modal.Sandbox.from_name(app_name, sandbox_name)
-        if sb.poll() is None:
-            print(f"[sandbox_manager] Found existing named sandbox for {user_id}: {sb.object_id}")
-            # Get tunnel URLs
-            tunnels = sb.tunnels()
-            http_tunnel = tunnels.get(8080)
-            terminal_tunnel = tunnels.get(8081)
-            if http_tunnel:
-                http_url = http_tunnel.url
-                terminal_url = terminal_tunnel.url if terminal_tunnel else None
-                # Cache it
-                _active_sandboxes[user_id] = (sb, http_url, terminal_url)
-                print(f"[sandbox_manager] Reusing named sandbox: http={http_url}, terminal={terminal_url}")
-                return sb, http_url, terminal_url
+    # Helper to lookup existing sandbox and get its URLs
+    def _try_get_existing_sandbox():
+        try:
+            sb = modal.Sandbox.from_name(app_name, sandbox_name)
+            if sb.poll() is None:
+                print(f"[sandbox_manager] Found existing named sandbox for {user_id}: {sb.object_id}")
+                tunnels = sb.tunnels()
+                http_tunnel = tunnels.get(8080)
+                terminal_tunnel = tunnels.get(8081)
+                if http_tunnel:
+                    return sb, http_tunnel.url, terminal_tunnel.url if terminal_tunnel else None
+                print(f"[sandbox_manager] Named sandbox found but no tunnel")
             else:
-                print(f"[sandbox_manager] Named sandbox found but no tunnel, creating new one")
-    except modal.exception.NotFoundError:
-        print(f"[sandbox_manager] No existing named sandbox for {user_id}, creating new one")
-    except Exception as e:
-        print(f"[sandbox_manager] Error looking up named sandbox: {e}, creating new one")
+                print(f"[sandbox_manager] Named sandbox exists but not running")
+        except modal.exception.NotFoundError:
+            print(f"[sandbox_manager] No existing named sandbox for {user_id}")
+        except Exception as e:
+            print(f"[sandbox_manager] Error looking up named sandbox: {e}")
+        return None
+
+    # Try to find existing named sandbox from Modal
+    result = _try_get_existing_sandbox()
+    if result:
+        sb, http_url, terminal_url = result
+        _active_sandboxes[user_id] = (sb, http_url, terminal_url)
+        print(f"[sandbox_manager] Reusing named sandbox: http={http_url}, terminal={terminal_url}")
+        return sb, http_url, terminal_url
 
     # Create user's volume (persistent across sandbox restarts)
     print(f"[sandbox_manager] Creating volume for user: {user_id}")
@@ -192,22 +197,34 @@ async def get_or_create_sandbox(user_id: str) -> tuple[modal.Sandbox, str, str |
     if _code_volume:
         volumes["/code"] = _code_volume
 
-    sb = modal.Sandbox.create(
-        app=_app,
-        name=sandbox_name,  # Named sandbox for cross-instance lookup
-        image=_sandbox_image,
-        secrets=_secrets,
-        env={
-            "IS_SANDBOX": "1",
-            "HOME": "/workspace",
-        },
-        timeout=3600,  # 1 hour max lifetime
-        idle_timeout=300,  # 5 min idle = terminate
-        volumes=volumes,
-        cpu=1.0,
-        memory=512,
-        encrypted_ports=[8080, 8081],  # 8080=HTTP/files, 8081=terminal WebSocket
-    )
+    try:
+        sb = modal.Sandbox.create(
+            app=_app,
+            name=sandbox_name,  # Named sandbox for cross-instance lookup
+            image=_sandbox_image,
+            secrets=_secrets,
+            env={
+                "IS_SANDBOX": "1",
+                "HOME": "/workspace",
+            },
+            timeout=3600,  # 1 hour max lifetime
+            idle_timeout=300,  # 5 min idle = terminate
+            volumes=volumes,
+            cpu=1.0,
+            memory=512,
+            encrypted_ports=[8080, 8081],  # 8080=HTTP/files, 8081=terminal WebSocket
+        )
+    except modal.exception.AlreadyExistsError:
+        # Race condition: another request created the sandbox between our check and create
+        print(f"[sandbox_manager] Sandbox already exists (race condition), retrying lookup")
+        await asyncio.sleep(1)  # Give it a moment to initialize
+        result = _try_get_existing_sandbox()
+        if result:
+            sb, http_url, terminal_url = result
+            _active_sandboxes[user_id] = (sb, http_url, terminal_url)
+            return sb, http_url, terminal_url
+        else:
+            raise RuntimeError(f"Sandbox '{sandbox_name}' exists but cannot be accessed")
     print(f"[sandbox_manager] Sandbox created: {sb.object_id}")
 
     # Start the sandbox server inside (don't wait for it to complete)
