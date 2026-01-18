@@ -27,6 +27,39 @@ if IS_MODAL:
     )
     import sandbox_manager
     import httpx
+
+    async def _get_sandbox_file_tree(user_id: str, path: str = "") -> dict:
+        """Fetch file tree from user's sandbox."""
+        _, http_url, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{http_url}/files/list",
+                params={"path": path},
+                timeout=30.0,
+            )
+            if resp.status_code != 200:
+                raise Exception(f"Failed to fetch file tree: {resp.text}")
+            data = resp.json()
+            if "error" in data:
+                raise Exception(data["error"])
+            return data.get("data", {})
+
+    async def _read_sandbox_file(user_id: str, path: str) -> dict:
+        """Read file contents from user's sandbox."""
+        _, http_url, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{http_url}/files/read",
+                params={"path": path},
+                timeout=30.0,
+            )
+            if resp.status_code != 200:
+                raise Exception(f"Failed to read file: {resp.text}")
+            data = resp.json()
+            if "error" in data:
+                raise Exception(data["error"])
+            return data.get("data", {})
+
     # Queue functions not available in Modal mode
     enqueue_message = None
     set_response_callback = None
@@ -512,6 +545,7 @@ async def websocket_terminal(websocket: WebSocket):
         
         user_id: str | None = None
         sandbox_ws = None
+        relay_task = None
         
         try:
             while True:
@@ -523,29 +557,40 @@ async def websocket_terminal(websocket: WebSocket):
                         msg = json.loads(data)
                         if msg.get("type") == "connect":
                             user_id = msg.get("user_id", f"guest_{uuid.uuid4().hex[:8]}")
-                            # Get sandbox terminal URL
-                            _, _, terminal_url = await sandbox_manager.get_or_create_sandbox(user_id)
-                            if not terminal_url:
-                                await websocket.send_json({"type": "error", "error": "Terminal not available"})
-                                continue
+                            print(f"[terminal] Connecting user {user_id} to sandbox terminal...")
                             
-                            # Convert HTTPS URL to WSS
-                            ws_url = terminal_url.replace("https://", "wss://").replace("http://", "ws://")
-                            
-                            # Connect to sandbox terminal
-                            sandbox_ws = await websockets.connect(ws_url)
-                            await websocket.send_json({"type": "connected", "user_id": user_id})
-                            
-                            # Start bidirectional relay
-                            async def relay_from_sandbox():
-                                try:
-                                    async for message in sandbox_ws:
-                                        await websocket.send_text(message)
-                                except Exception:
-                                    pass
-                            
-                            relay_task = asyncio.create_task(relay_from_sandbox())
+                            try:
+                                # Get sandbox terminal URL
+                                _, _, terminal_url = await sandbox_manager.get_or_create_sandbox(user_id)
+                                if not terminal_url:
+                                    await websocket.send_json({"type": "error", "error": "Terminal not available"})
+                                    continue
+                                
+                                # Convert HTTPS URL to WSS
+                                ws_url = terminal_url.replace("https://", "wss://").replace("http://", "ws://")
+                                print(f"[terminal] Connecting to sandbox WebSocket: {ws_url}")
+                                
+                                # Connect to sandbox terminal
+                                sandbox_ws = await websockets.connect(ws_url)
+                                await websocket.send_json({"type": "connected", "user_id": user_id})
+                                print(f"[terminal] Connected to sandbox for user {user_id}")
+                                
+                                # Start bidirectional relay from sandbox to client
+                                async def relay_from_sandbox():
+                                    try:
+                                        async for message in sandbox_ws:
+                                            await websocket.send_text(message)
+                                    except websockets.exceptions.ConnectionClosed:
+                                        print("[terminal] Sandbox WebSocket closed")
+                                    except Exception as e:
+                                        print(f"[terminal] Relay error: {e}")
+                                
+                                relay_task = asyncio.create_task(relay_from_sandbox())
+                            except Exception as e:
+                                print(f"[terminal] Failed to connect to sandbox: {e}")
+                                await websocket.send_json({"type": "error", "error": f"Failed to connect: {str(e)}"})
                             continue
+                            
                         elif msg.get("type") == "resize" and sandbox_ws:
                             await sandbox_ws.send(data)
                             continue
@@ -554,15 +599,27 @@ async def websocket_terminal(websocket: WebSocket):
                 
                 # Forward to sandbox
                 if sandbox_ws:
-                    await sandbox_ws.send(data)
+                    try:
+                        await sandbox_ws.send(data)
+                    except Exception as e:
+                        print(f"[terminal] Failed to send to sandbox: {e}")
+                        await websocket.send_json({"type": "error", "error": f"Send failed: {str(e)}"})
                 else:
                     await websocket.send_json({"type": "error", "error": "Not connected. Send connect message first."})
                     
         except WebSocketDisconnect:
-            print("Terminal WebSocket disconnected")
+            print(f"[terminal] WebSocket disconnected for user: {user_id}")
         except Exception as e:
-            print(f"Terminal WebSocket error: {e}")
+            print(f"[terminal] WebSocket error: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
+            if relay_task:
+                relay_task.cancel()
+                try:
+                    await relay_task
+                except asyncio.CancelledError:
+                    pass
             if sandbox_ws:
                 await sandbox_ws.close()
     else:
