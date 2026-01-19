@@ -8,6 +8,7 @@ import uvicorn
 import asyncio
 import os
 import json
+import time
 import uuid
 from config import get_settings
 from routes import auth_router, chat_router
@@ -39,7 +40,7 @@ if IS_MODAL:
         result = await sandbox_manager.lookup_sandbox(user_id)
         if result is None:
             raise SandboxNotReadyError("Sandbox not initialized. Please send a message first to start your session.")
-        _, http_url, _ = result
+        _, http_url, _, _ = result
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{http_url}/files/list",
@@ -58,7 +59,7 @@ if IS_MODAL:
         result = await sandbox_manager.lookup_sandbox(user_id)
         if result is None:
             raise SandboxNotReadyError("Sandbox not initialized. Please send a message first to start your session.")
-        _, http_url, _ = result
+        _, http_url, _, _ = result
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{http_url}/files/read",
@@ -71,6 +72,38 @@ if IS_MODAL:
             if "error" in data:
                 raise Exception(data["error"])
             return data.get("data", {})
+
+    async def _push_file_tree_for_user(user_id: str, path: str = "") -> None:
+        if not user_id:
+            return
+        connections = _file_ws_connections_by_user.get(user_id)
+        if not connections:
+            return
+        now = time.time()
+        last_sent = _file_refresh_last.get(user_id, 0.0)
+        if now - last_sent < _FILE_REFRESH_MIN_INTERVAL:
+            return
+        if user_id in _file_refresh_inflight:
+            return
+        _file_refresh_inflight.add(user_id)
+        try:
+            tree = await _get_sandbox_file_tree(user_id, path)
+            for ws in list(connections):
+                try:
+                    await ws.send_json({"type": "tree", "data": tree})
+                except Exception:
+                    pass
+            _file_refresh_last[user_id] = time.time()
+        except SandboxNotReadyError:
+            for ws in list(connections):
+                try:
+                    await ws.send_json({"type": "error", "error": "Not initialized"})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            _file_refresh_inflight.discard(user_id)
 
     # Queue functions not available in Modal mode
     enqueue_message = None
@@ -90,6 +123,36 @@ else:
 
 # Store active file watcher WebSocket connections
 _file_ws_connections: set[WebSocket] = set()
+_file_ws_connections_by_user: dict[str, set[WebSocket]] = {}
+_file_refresh_inflight: set[str] = set()
+_file_refresh_last: dict[str, float] = {}
+_FILE_REFRESH_MIN_INTERVAL = 1.0
+
+
+def _register_file_ws(user_id: str, websocket: WebSocket) -> None:
+    if not user_id:
+        return
+    connections = _file_ws_connections_by_user.setdefault(user_id, set())
+    connections.add(websocket)
+
+
+def _unregister_file_ws(user_id: str | None, websocket: WebSocket) -> None:
+    if not user_id:
+        return
+    connections = _file_ws_connections_by_user.get(user_id)
+    if not connections:
+        return
+    connections.discard(websocket)
+    if not connections:
+        del _file_ws_connections_by_user[user_id]
+
+
+def _is_file_mutation_tool(name: str | None) -> bool:
+    if not name:
+        return True
+    if name in {"Write", "Edit", "Bash"}:
+        return True
+    return name.endswith("__Write") or name.endswith("__Edit") or name.endswith("__Bash")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -97,7 +160,7 @@ async def lifespan(app: FastAPI):
     # Startup
     if IS_MODAL:
         await get_session_manager()
-        # File watching in Modal mode is done via sandbox polling (no local watcher)
+        # File watching in Modal mode is triggered by tool results (no local watcher)
         yield
         # Shutdown
         await cleanup_session_manager()
@@ -195,6 +258,11 @@ async def clear_chat(request: WebChatRequest):
 @app.get("/chat/history")
 async def get_chat_history(user_id: str = "guest", limit: int = 50, offset: int = 0):
     """Get chat history for a user."""
+    if IS_MODAL:
+        try:
+            await sandbox_manager.get_or_create_sandbox(user_id)
+        except Exception as e:
+            print(f"[chat_history] Failed to initialize sandbox for {user_id}: {e}")
     messages = database.get_messages(user_id, limit, offset)
     total = database.get_message_count(user_id)
     return {
@@ -209,6 +277,48 @@ async def get_chat_history(user_id: str = "guest", limit: int = 50, offset: int 
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+@app.post("/sandbox/terminate")
+async def terminate_sandbox_endpoint(user_id: str = "guest"):
+    """Terminate user's sandbox to force recreation with new settings."""
+    if not IS_MODAL:
+        return {"terminated": False, "error": "Only available in Modal mode"}
+
+    try:
+        result = await sandbox_manager.terminate_sandbox(user_id)
+        return {"terminated": result, "user_id": user_id, "message": "Send a chat message to create a new sandbox"}
+    except Exception as e:
+        return {"terminated": False, "error": str(e)}
+
+
+@app.get("/preview")
+async def get_preview(user_id: str = "guest"):
+    """Get preview URL for user's sandbox."""
+    if not IS_MODAL:
+        return {"preview_url": None, "error": "Preview only available in Modal mode"}
+
+    try:
+        # Get sandbox reference (may be cached)
+        result = await sandbox_manager.lookup_sandbox(user_id)
+        if result is None:
+            return {"preview_url": None, "error": "No sandbox found", "user_id": user_id}
+
+        sb, _, _, _ = result
+
+        # Always fetch FRESH tunnel info - don't use cached preview_url
+        tunnels = sb.tunnels()
+        preview_tunnel = tunnels.get(3000)
+        fresh_preview_url = preview_tunnel.url if preview_tunnel else None
+
+        return {
+            "preview_url": fresh_preview_url,
+            "user_id": user_id,
+            "available_ports": list(tunnels.keys()),
+        }
+    except Exception as e:
+        import traceback
+        return {"preview_url": None, "error": str(e), "traceback": traceback.format_exc(), "user_id": user_id}
 
 
 # WebSocket endpoint for queued message processing
@@ -269,7 +379,13 @@ async def websocket_chat(websocket: WebSocket):
                     database.save_message(user_id, "user", content)
 
                     # Streaming callbacks to send tool events as they happen
+                    tool_use_names: dict[str, str] = {}
+
                     async def on_tool_use(event):
+                        tool_use_id = event.get("tool_use_id")
+                        name = event.get("name")
+                        if tool_use_id and name:
+                            tool_use_names[tool_use_id] = name
                         await websocket.send_json({
                             "type": "tool_use",
                             "message_id": message_id,
@@ -282,6 +398,9 @@ async def websocket_chat(websocket: WebSocket):
                             "message_id": message_id,
                             **event,
                         })
+                        tool_name = tool_use_names.get(event.get("tool_use_id"))
+                        if user_id and _is_file_mutation_tool(tool_name):
+                            await _push_file_tree_for_user(user_id)
 
                     try:
                         response_text, session_id, tool_events = await get_response_streaming(
@@ -469,13 +588,17 @@ async def websocket_files(websocket: WebSocket):
 
                 if msg_type == "connect":
                     user_id = msg.get("user_id", f"guest_{uuid.uuid4().hex[:8]}")
+                    _register_file_ws(user_id, websocket)
                     # Send initial tree from sandbox
                     try:
                         tree = await _get_sandbox_file_tree(user_id, "")
                         await websocket.send_json({"type": "connected", "user_id": user_id})
                         await websocket.send_json({"type": "tree", "data": tree})
                     except Exception as e:
-                        await websocket.send_json({"type": "error", "error": f"Failed to load directory tree: {str(e)}"})
+                        if isinstance(e, SandboxNotReadyError):
+                            await websocket.send_json({"type": "error", "error": "Not initialized"})
+                        else:
+                            await websocket.send_json({"type": "error", "error": f"Failed to load directory tree: {str(e)}"})
 
                 elif msg_type == "get_tree":
                     if not user_id:
@@ -486,7 +609,10 @@ async def websocket_files(websocket: WebSocket):
                         tree = await _get_sandbox_file_tree(user_id, path)
                         await websocket.send_json({"type": "tree", "data": tree})
                     except Exception as e:
-                        await websocket.send_json({"type": "error", "error": str(e)})
+                        if isinstance(e, SandboxNotReadyError):
+                            await websocket.send_json({"type": "error", "error": "Not initialized"})
+                        else:
+                            await websocket.send_json({"type": "error", "error": str(e)})
 
                 elif msg_type == "subscribe":
                     await websocket.send_json({"type": "subscribed"})
@@ -498,7 +624,10 @@ async def websocket_files(websocket: WebSocket):
                             tree = await _get_sandbox_file_tree(user_id, "")
                             await websocket.send_json({"type": "tree", "data": tree})
                         except Exception as e:
-                            await websocket.send_json({"type": "error", "error": str(e)})
+                            if isinstance(e, SandboxNotReadyError):
+                                await websocket.send_json({"type": "error", "error": "Not initialized"})
+                            else:
+                                await websocket.send_json({"type": "error", "error": str(e)})
 
                 else:
                     await websocket.send_json({"type": "error", "error": f"Unknown message type: {msg_type}"})
@@ -562,6 +691,8 @@ async def websocket_files(websocket: WebSocket):
     except Exception as e:
         print(f"File watcher WebSocket error: {e}")
     finally:
+        if IS_MODAL:
+            _unregister_file_ws(user_id, websocket)
         _file_ws_connections.discard(websocket)
 
 
@@ -604,11 +735,11 @@ async def websocket_terminal(websocket: WebSocket):
                                 result = await sandbox_manager.lookup_sandbox(user_id)
                                 if result is None:
                                     await websocket.send_json({
-                                        "type": "error", 
+                                        "type": "error",
                                         "error": "Sandbox not initialized. Please send a message first to start your session."
                                     })
                                     continue
-                                _, _, terminal_url = result
+                                _, _, terminal_url, _ = result
                                 if not terminal_url:
                                     await websocket.send_json({"type": "error", "error": "Terminal not available"})
                                     continue

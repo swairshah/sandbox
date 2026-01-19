@@ -13,6 +13,7 @@ IS_MODAL = os.environ.get("MODAL_ENVIRONMENT") is not None
 
 if IS_MODAL:
     from modal_sessions import get_response, clear_session
+    import sandbox_manager
 else:
     from sessions import get_response, clear_session
 
@@ -88,6 +89,11 @@ async def get_chat_history(
     offset: int = 0,
 ):
     """Get chat history for the authenticated user."""
+    if IS_MODAL:
+        try:
+            await sandbox_manager.get_or_create_sandbox(user.user_id)
+        except Exception as e:
+            print(f"[chat_history] Failed to initialize sandbox for {user.user_id}: {e}")
     return {
         "messages": [],
         "total": 0,

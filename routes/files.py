@@ -22,7 +22,7 @@ if IS_MODAL:
         result = await sandbox_manager.lookup_sandbox(user_id)
         if result is None:
             raise SandboxNotReadyError("Sandbox not initialized. Please send a message first to start your session.")
-        _, http_url, _ = result
+        _, http_url, _, _ = result
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{http_url}/files/list",
@@ -41,7 +41,7 @@ if IS_MODAL:
         result = await sandbox_manager.lookup_sandbox(user_id)
         if result is None:
             raise SandboxNotReadyError("Sandbox not initialized. Please send a message first to start your session.")
-        _, http_url, _ = result
+        _, http_url, _, _ = result
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{http_url}/files/read",
@@ -83,7 +83,7 @@ async def get_file_tree(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         if IS_MODAL and isinstance(e, SandboxNotReadyError):
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail="Not initialized")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -110,7 +110,7 @@ async def list_files(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         if IS_MODAL and isinstance(e, SandboxNotReadyError):
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail="Not initialized")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -153,5 +153,5 @@ async def read_file(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         if IS_MODAL and isinstance(e, SandboxNotReadyError):
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail="Not initialized")
         raise HTTPException(status_code=500, detail=str(e))

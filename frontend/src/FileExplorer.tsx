@@ -140,8 +140,10 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set(['.']));
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
+  const retryTimeoutRef = useRef<number | null>(null);
   const userIdRef = useRef(userId); // Track latest userId
 
   // Keep userIdRef in sync
@@ -159,6 +161,8 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
     ws.onopen = () => {
       // Send connect message with user_id first - use ref for latest value
       const effectiveUserId = userIdRef.current || `guest_${Math.random().toString(36).slice(2, 10)}`;
+      setIsLoading(true);
+      setError(null);
       ws.send(JSON.stringify({ type: 'connect', user_id: effectiveUserId }));
     };
 
@@ -169,15 +173,44 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
         if (data.type === 'connected') {
           setConnected(true);
           setError(null);
+          setIsLoading(true);
+          if (retryTimeoutRef.current) {
+            clearTimeout(retryTimeoutRef.current);
+            retryTimeoutRef.current = null;
+          }
           // Subscribe after connected
           ws.send(JSON.stringify({ type: 'subscribe' }));
         } else if (data.type === 'tree') {
           setTree(data.data);
+          setError(null);
+          setIsLoading(false);
+          if (retryTimeoutRef.current) {
+            clearTimeout(retryTimeoutRef.current);
+            retryTimeoutRef.current = null;
+          }
         } else if (data.type === 'file_event') {
           handleFileEvent(data as FileEvent);
         } else if (data.type === 'error') {
           console.error('File WebSocket error:', data.error);
-          setError(data.error);
+          if (
+            typeof data.error === 'string' &&
+            (data.error.includes('Sandbox not initialized') || data.error === 'Not initialized')
+          ) {
+            setError('Not initialized');
+            setIsLoading(false);
+            if (retryTimeoutRef.current) {
+              clearTimeout(retryTimeoutRef.current);
+            }
+            retryTimeoutRef.current = window.setTimeout(() => {
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                setIsLoading(true);
+                wsRef.current.send(JSON.stringify({ type: 'get_tree', path: '' }));
+              }
+            }, 1500);
+          } else {
+            setError(data.error);
+            setIsLoading(false);
+          }
         }
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);
@@ -187,6 +220,11 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
     ws.onclose = () => {
       setConnected(false);
       wsRef.current = null;
+      setIsLoading(true);
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+        retryTimeoutRef.current = null;
+      }
       // Reconnect after 2 seconds
       reconnectTimeoutRef.current = window.setTimeout(connect, 2000);
     };
@@ -194,6 +232,7 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
     ws.onerror = (e) => {
       console.error('File WebSocket error:', e);
       setError('Connection error');
+      setIsLoading(false);
     };
 
     wsRef.current = ws;
@@ -214,11 +253,29 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+      }
       if (wsRef.current) {
         wsRef.current.close();
       }
     };
   }, [connect]);
+
+  useEffect(() => {
+    const handleRefreshEvent = () => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        setIsLoading(true);
+        setError(null);
+        wsRef.current.send(JSON.stringify({ type: 'get_tree', path: '' }));
+      }
+    };
+
+    window.addEventListener('monios:file-refresh', handleRefreshEvent);
+    return () => {
+      window.removeEventListener('monios:file-refresh', handleRefreshEvent);
+    };
+  }, []);
 
   // Reconnect when userId changes
   useEffect(() => {
@@ -232,6 +289,7 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
       wsRef.current = null;
       setConnected(false);
       setTree(null); // Clear tree for new user
+      setIsLoading(true);
       connect();
     }
   }, [userId, connect]);
@@ -254,6 +312,8 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
 
   const handleRefresh = () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setIsLoading(true);
+      setError(null);
       wsRef.current.send(JSON.stringify({ type: 'get_tree', path: '' }));
     }
   };
@@ -277,8 +337,8 @@ export default function FileExplorer({ onFileDragStart, onFileSelect, userId }: 
         </div>
       </div>
       <div className="file-explorer-content">
-        {error && <div className="file-explorer-error">{error}</div>}
-        {!tree && !error && <div className="file-explorer-loading">Loading...</div>}
+        {!tree && isLoading && <div className="file-explorer-loading">Loading...</div>}
+        {!isLoading && error && <div className="file-explorer-error">{error}</div>}
         {tree && (
           <div className="file-tree">
             {tree.children && tree.children.length > 0 ? (

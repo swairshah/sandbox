@@ -73,14 +73,17 @@ export default function App() {
   });
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
-  const [activePanel, setActivePanel] = useState<"chat" | "terminal" | "viewer">("chat");
+  const [activePanel, setActivePanel] = useState<"chat" | "terminal" | "viewer" | "preview">("chat");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [viewerReadOnly] = useState(true); // Config: set to false to enable editing
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const userInputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
+  const toolUseNamesRef = useRef<Record<string, string>>({});
 
   // Get current user identifier (email for auth, guestId for guests)
   const userId = auth.isAuthenticated ? auth.user?.email || "user" : guestId;
@@ -216,6 +219,9 @@ export default function App() {
           case "tool_use":
             // Stream tool use as it happens
             if (data.message_id) {
+              if (data.tool_use_id && data.name) {
+                toolUseNamesRef.current[data.tool_use_id] = data.name;
+              }
               setMessages((prev) => [
                 ...prev,
                 {
@@ -236,6 +242,20 @@ export default function App() {
           case "tool_result":
             // Stream tool result as it happens
             if (data.message_id) {
+              const toolName = data.tool_use_id
+                ? toolUseNamesRef.current[data.tool_use_id]
+                : undefined;
+              const shouldRefreshFiles =
+                !toolName ||
+                toolName === "Write" ||
+                toolName === "Edit" ||
+                toolName === "Bash" ||
+                toolName.endsWith("__Write") ||
+                toolName.endsWith("__Edit") ||
+                toolName.endsWith("__Bash");
+              if (shouldRefreshFiles) {
+                window.dispatchEvent(new CustomEvent("monios:file-refresh"));
+              }
               setMessages((prev) => [
                 ...prev,
                 {
@@ -530,6 +550,28 @@ export default function App() {
     setActivePanel("chat");
   };
 
+  // Fetch preview URL
+  const fetchPreviewUrl = useCallback(async () => {
+    setPreviewLoading(true);
+    try {
+      const response = await fetch(`/preview?user_id=${encodeURIComponent(userId)}`);
+      const data = await response.json();
+      if (data.preview_url) {
+        setPreviewUrl(data.preview_url);
+      }
+    } catch (e) {
+      console.error("Failed to fetch preview URL:", e);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [userId]);
+
+  // Refresh preview URL when switching to preview tab
+  const handlePreviewTab = useCallback(() => {
+    setActivePanel("preview");
+    fetchPreviewUrl();
+  }, [fetchPreviewUrl]);
+
   return (
     <div className="app">
       <header>
@@ -625,6 +667,13 @@ export default function App() {
             >
               Viewer
               {selectedFile && <span className="tab-indicator">*</span>}
+            </button>
+            <button
+              className={`panel-tab ${activePanel === "preview" ? "active" : ""}`}
+              onClick={handlePreviewTab}
+            >
+              Preview
+              {previewUrl && <span className="tab-indicator">*</span>}
             </button>
           </div>
 
@@ -742,6 +791,49 @@ export default function App() {
               onClose={handleCloseViewer}
               userId={userId}
             />
+          </div>
+
+          <div className={`panel-content ${activePanel === "preview" ? "active" : ""}`}>
+            <div className="preview-panel">
+              {previewLoading ? (
+                <div className="preview-loading">Loading preview...</div>
+              ) : previewUrl ? (
+                <>
+                  <div className="preview-toolbar">
+                    <span className="preview-url">{previewUrl}</span>
+                    <button
+                      className="preview-refresh"
+                      onClick={fetchPreviewUrl}
+                      title="Refresh preview URL"
+                    >
+                      Refresh
+                    </button>
+                    <a
+                      href={previewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="preview-open"
+                    >
+                      Open in new tab
+                    </a>
+                  </div>
+                  <iframe
+                    src={previewUrl}
+                    className="preview-iframe"
+                    title="App Preview"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                  />
+                </>
+              ) : (
+                <div className="preview-empty">
+                  <p>No preview available.</p>
+                  <p>Start a dev server on port 3000 in the terminal to see a preview here.</p>
+                  <button onClick={fetchPreviewUrl} className="preview-check-btn">
+                    Check for preview
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

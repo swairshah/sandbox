@@ -1000,3 +1000,81 @@ header {
   text-align: right;
   user-select: none;
 }
+
+/* Preview Panel Styles */
+.preview-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+}
+
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background-color: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.preview-url {
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-refresh,
+.preview-open,
+.preview-check-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-family: inherit;
+  text-decoration: none;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.preview-refresh:hover,
+.preview-open:hover,
+.preview-check-btn:hover {
+  background-color: var(--border);
+  border-color: var(--text-muted);
+}
+
+.preview-iframe {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background-color: #fff;
+}
+
+.preview-loading,
+.preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  text-align: center;
+  padding: 2rem;
+  gap: 0.75rem;
+}
+
+.preview-empty p {
+  margin: 0;
+}
+
+.preview-check-btn {
+  margin-top: 0.5rem;
+}

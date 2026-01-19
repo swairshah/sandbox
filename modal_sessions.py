@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -68,6 +69,14 @@ def _combine_output(stdout: str, stderr: str) -> str:
     if stdout and not stdout.endswith("\n"):
         return stdout + "\n" + stderr
     return stdout + stderr
+
+
+async def _maybe_await_callback(callback, *args) -> None:
+    if not callback:
+        return
+    result = callback(*args)
+    if asyncio.iscoroutine(result):
+        await result
 
 
 def _create_sdk_mcp_server(name: str, tools: list, version: str = "1.0.0") -> dict[str, Any]:
@@ -165,7 +174,7 @@ class ModalToolProvider:
 
         async def _run_cmd(cmd: str) -> tuple[str, int]:
             try:
-                sandbox, _, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+                sandbox, _, _, _ = await sandbox_manager.get_or_create_sandbox(user_id)
                 # Always run commands in /workspace directory
                 full_cmd = f"cd {workdir} && {cmd}"
                 process = sandbox.exec("bash", "-c", full_cmd)
@@ -178,7 +187,7 @@ class ModalToolProvider:
 
         async def _run_cmd_stdin(cmd: str, stdin_data: str) -> tuple[str, int]:
             try:
-                sandbox, _, _ = await sandbox_manager.get_or_create_sandbox(user_id)
+                sandbox, _, _, _ = await sandbox_manager.get_or_create_sandbox(user_id)
                 # Always run commands in /workspace directory
                 full_cmd = f"cd {workdir} && {cmd}"
                 process = sandbox.exec("bash", "-c", full_cmd)
@@ -448,8 +457,7 @@ class ModalSessionManager:
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         response_text += block.text
-                        if on_text:
-                            on_text(block.text)
+                        await _maybe_await_callback(on_text, block.text)
                     elif isinstance(block, ToolUseBlock):
                         event = {
                             "type": "tool_use",
@@ -458,8 +466,7 @@ class ModalSessionManager:
                             "tool_use_id": block.id,
                         }
                         tool_events.append(event)
-                        if on_tool_use:
-                            on_tool_use(event)
+                        await _maybe_await_callback(on_tool_use, event)
                     elif isinstance(block, ToolResultBlock):
                         event = {
                             "type": "tool_result",
@@ -468,8 +475,7 @@ class ModalSessionManager:
                             "is_error": block.is_error,
                         }
                         tool_events.append(event)
-                        if on_tool_result:
-                            on_tool_result(block)
+                        await _maybe_await_callback(on_tool_result, event)
 
             elif isinstance(msg, ResultMessage):
                 new_session_id = msg.session_id
